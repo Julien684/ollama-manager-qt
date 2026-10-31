@@ -30,6 +30,19 @@ cargo build --release
 # → target/release/ollama-manager-qt  (binaire unique, ~3 Mo)
 ```
 
+## Installation (Solus)
+
+Paquet `.eopkg` fourni dans ce dépôt :
+
+```bash
+sudo eopkg install -y \
+  https://depoa.julien68.fr/Linuxon/ollama-manager-qt/raw/branch/main/ollama-manager-qt-0.1.0-1-1-x86_64.eopkg
+```
+
+Ou depuis le dépôt binaire personnel : `sudo eopkg install -y ollama-manager-qt`
+(dépôt `linuxon` — voir `Linuxon/eopkg-repo`). Seul prérequis : `qt6-base`
+(fourni par le système Solus).
+
 ## Tests
 
 ```bash
