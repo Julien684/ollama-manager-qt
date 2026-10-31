@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 
 use qtrs::prelude::*;
-use qtrs::{Application, MessageBox, Settings, Timer};
+use qtrs::{Application, MessageBox, Timer};
 
 mod ollama;
 use ollama::{fmt_bytes, fmt_date, delete_model, get_version, list_models,
@@ -46,16 +46,57 @@ enum WorkerMsg {
 const SETTINGS_ORG: &str = "OllamaManager";
 const SETTINGS_APP: &str = "ollama-manager-qt";
 
+/// Chemin du fichier de configuration (~/.config/OllamaManager/...).
+///
+/// On ne passe pas par `qtrs::Settings` pour la **lecture** : son chemin
+/// de read (prebuilt C++) renvoie la chaîne vide même quand le `.ini` est
+/// écrit par Qt lui-même (persistance de l'URL cassée). On gère donc le
+/// fichier INI directement — format identique à celui de QSettings,
+/// donc rétro-compatible.
+fn config_path() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(".config").join(SETTINGS_ORG).join(format!("{SETTINGS_APP}.ini"))
+}
+
+/// Parse la clé `serverUrl` d'un contenu INI Qt. Testable sans GUI.
+pub fn parse_ini_server_url(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("serverUrl=") {
+            let v = rest.trim();
+            // QSettings encadre les valeurs contenant `:`, `/` ou espaces
+            // dans des guillemets « ... ».
+            if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+                return Some(v[1..v.len() - 1].to_string());
+            }
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
 fn load_server_url() -> String {
-    let s = Settings::new(SETTINGS_ORG, SETTINGS_APP);
-    s.get::<String>("serverUrl", String::new())
-        .convert_or::<String>()
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|c| parse_ini_server_url(&c))
+        .unwrap_or_default()
 }
 
 fn save_server_url(url: &str) {
-    let s = Settings::new(SETTINGS_ORG, SETTINGS_APP);
-    s.set("serverUrl", url.to_string());
-    s.sync();
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Échappement minimal des caractères spéciaux QSettings.
+    let escaped = url.replace('"', "\\\"").replace('\\', "\\\\");
+    let need_escape = url.contains(&['"', '\\', ' ', ':', '['][..]);
+    let val = if need_escape { format!("\"{escaped}\"") } else { escaped };
+    let _ = std::fs::write(&path, format!("[General]\nserverUrl={val}\n"));
 }
 
 /// Lit le texte courant d'un `QLineEdit` via son pointeur C++.
@@ -237,6 +278,12 @@ fn build_ui(
     root.set_spacing(10);
 
     // ---- Ligne serveur : [ QLineEdit | Tester | Enregistrer ] --------------
+    // Titre du champ : sans lui l'utilisateur ne sait pas quoi y saisir.
+    let srv_title =
+        Label::new("Serveur Ollama (port par défaut : 11434)")
+            .parent(&central)
+            .build();
+    root.add(srv_title);
     let srv_row = Widget::new().parent(&central).build();
     let mut srv_l = HBoxLayout::with_parent(&srv_row);
     srv_l.set_spacing(8);
@@ -537,7 +584,16 @@ fn main() {
             .build(),
     ));
 
-    let (ui, _layouts) = build_ui(&window, tx.clone());
+    // Ordre de drop CRITIQUE à la fermeture de l'application : `ui`
+    // (table / barre / statut — enfants de `central`) doit être dropé **avant**
+    // `_layouts` (qui contient `central`). Si `central` était supprimé en C++
+    // en premier, le drop de `ui` appellerait `disconnectAll` sur des pointeurs
+    // morts → SIGSEGV (logs « wildcard call disconnects from destroyed
+    // signal »). On lie donc `ui` *en dernier* : le drop Rust est l'inverse
+    // de l'ordre de déclaration, `ui` passe donc au premier rang du drop.
+    let _ui_layouts = build_ui(&window, tx.clone());
+    let _layouts = _ui_layouts.1;
+    let ui = _ui_layouts.0;
     window.borrow().show();
 
     // Chargement initial si une adresse est déjà configurée.
@@ -553,87 +609,131 @@ fn main() {
     }
 
     // ---- Timer « pompe » : file worker → widgets ---------------------------
-    {
-        let tx2 = tx.clone();
-        let _timer = Timer::new(200)
-            .on_timeout({
-                let table = Rc::clone(&ui.table);
-                let bar = Rc::clone(&ui.bar);
-                let status = Rc::clone(&ui.status);
-                let models = Rc::clone(&ui.models);
-                move || {
-                    while let Ok(msg) = rx.try_recv() {
-                        match msg {
-                            WorkerMsg::List(Some(payload), _) => {
-                                let parsed: Vec<Model> =
-                                    serde_json::from_str(&payload).unwrap_or_default();
-                                let count = parsed.len();
-                                let ui_l = Ui {
-                                    table: table.clone(),
-                                    bar: bar.clone(),
-                                    status: status.clone(),
-                                    models: models.clone(),
-                                };
-                                fill_table(&ui_l, parsed);
-                                status
-                                    .borrow_mut()
-                                    .set_text(&format!(
-                                        "{} modèle(s) chargé(s).",
-                                        count
-                                    ));
-                            }
-                            WorkerMsg::List(None, err) => {
-                                status
-                                    .borrow_mut()
-                                    .set_text(&format!("Erreur : {err}"));
-                            }
-                            WorkerMsg::Progress { name, pct, status: st } => {
-                                bar.borrow_mut().set_value(pct as i32);
-                                status
-                                    .borrow_mut()
-                                    .set_text(&format!("[{name}] {st} — {pct}%"));
-                            }
-                            WorkerMsg::ActionDone { name, ok, message } => {
-                                let mb = MessageBox::new()
-                                    .icon(if ok { 2 } else { 0 })
-                                    .text(if ok {
-                                        "Terminé"
-                                    } else {
-                                        "Échec de l'opération"
-                                    })
-                                    .informative_text(&format!("{name} : {message}"))
-                                    .window_title("Ollama Manager")
-                                    .standard_buttons(0x400)
-                                    .build();
-                                let _ = mb.exec();
-                                bar.borrow_mut().set_value(0);
-                                // Recharger la liste après une action réussie.
-                                let url = load_server_url();
-                                if ok && !url.trim().is_empty() {
-                                    let tx3 = tx2.clone();
-                                    let url3 = url.clone();
-                                    std::thread::spawn(move || {
-                                        let (payload, err) = match list_models(&url3) {
-                                            Ok(m) => (
-                                                Some(
-                                                    serde_json::to_string(&m)
-                                                        .unwrap_or_default(),
-                                                ),
-                                                String::new(),
+    // Le timer est déclaré au niveau de `main` (pas dans un bloc `{ }`) : la
+    // variable doit vivre jusqu'à la fin de `app.exec()`, sinon il serait
+    // détruit avant le démarrage de la boucle d'événements et les résultats
+    // des workers ne seraient jamais pompés vers l'interface.
+    let tx2 = tx.clone();
+    let _timer = Timer::new(200)
+        .on_timeout({
+            let table = Rc::clone(&ui.table);
+            let bar = Rc::clone(&ui.bar);
+            let status = Rc::clone(&ui.status);
+            let models = Rc::clone(&ui.models);
+            move || {
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        WorkerMsg::List(Some(payload), _) => {
+                            let parsed: Vec<Model> =
+                                serde_json::from_str(&payload).unwrap_or_default();
+                            let count = parsed.len();
+                            let ui_l = Ui {
+                                table: table.clone(),
+                                bar: bar.clone(),
+                                status: status.clone(),
+                                models: models.clone(),
+                            };
+                            fill_table(&ui_l, parsed);
+                            status
+                                .borrow_mut()
+                                .set_text(&format!(
+                                    "{} modèle(s) chargé(s).",
+                                    count
+                                ));
+                        }
+                        WorkerMsg::List(None, err) => {
+                            status
+                                .borrow_mut()
+                                .set_text(&format!("Erreur : {err}"));
+                        }
+                        WorkerMsg::Progress { name, pct, status: st } => {
+                            bar.borrow_mut().set_value(pct as i32);
+                            status
+                                .borrow_mut()
+                                .set_text(&format!("[{name}] {st} — {pct}%"));
+                        }
+                        WorkerMsg::ActionDone { name, ok, message } => {
+                            let mb = MessageBox::new()
+                                .icon(if ok { 2 } else { 0 })
+                                .text(if ok {
+                                    "Terminé"
+                                } else {
+                                    "Échec de l'opération"
+                                })
+                                .informative_text(&format!("{name} : {message}"))
+                                .window_title("Ollama Manager")
+                                .standard_buttons(0x400)
+                                .build();
+                            let _ = mb.exec();
+                            bar.borrow_mut().set_value(0);
+                            // Recharger la liste après une action réussie.
+                            let url = load_server_url();
+                            if ok && !url.trim().is_empty() {
+                                let tx3 = tx2.clone();
+                                let url3 = url.clone();
+                                std::thread::spawn(move || {
+                                    let (payload, err) = match list_models(&url3) {
+                                        Ok(m) => (
+                                            Some(
+                                                serde_json::to_string(&m)
+                                                    .unwrap_or_default(),
                                             ),
-                                            Err(e) => (None, e.to_string()),
-                                        };
-                                        let _ = tx3.send(WorkerMsg::List(payload, err));
-                                    });
-                                }
+                                            String::new(),
+                                        ),
+                                        Err(e) => (None, e.to_string()),
+                                    };
+                                    let _ = tx3.send(WorkerMsg::List(payload, err));
+                                });
                             }
                         }
                     }
                 }
-            })
-            .build();
-        let _ = _timer;
-    }
+            }
+        })
+        .build();
 
     app.exec();
+}
+
+// ------------------------------------------------------------------
+// Tests unitaires (logique de persistance, sans GUI)
+// ------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ini_url_simple() {
+        assert_eq!(
+            parse_ini_server_url("[General]\nserverUrl=http://192.168.122.1:11434\n"),
+            Some("http://192.168.122.1:11434".to_string())
+        );
+    }
+
+    #[test]
+    fn ini_url_guillemets() {
+        // QSettings encadre les valeurs contenant `:`, `/`…
+        assert_eq!(
+            parse_ini_server_url("[General]\nserverUrl=\"http://192.168.122.1:11434\"\n"),
+            Some("http://192.168.122.1:11434".to_string())
+        );
+    }
+
+    #[test]
+    fn ini_url_absent() {
+        assert_eq!(parse_ini_server_url("[General]\nother=1\n"), None);
+    }
+
+    #[test]
+    fn ini_url_vide() {
+        assert_eq!(parse_ini_server_url(""), None);
+    }
+
+    #[test]
+    fn ini_url_ignore_autres_cles() {
+        assert_eq!(
+            parse_ini_server_url("[General]\nfoo=bar\nserverUrl=http://localhost:11434\n"),
+            Some("http://localhost:11434".to_string())
+        );
+    }
 }
