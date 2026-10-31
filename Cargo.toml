@@ -1,0 +1,18 @@
+[package]
+name = "ollama-manager-qt"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85.0"
+description = "Gestionnaire graphique (Qt6) d'Ollama : télécharger, mettre à jour, supprimer des modèles"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+qtrs = "0.5.9"
+cxx = "1.0"
+ureq = { version = "2", features = ["json", "tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+strip = true
