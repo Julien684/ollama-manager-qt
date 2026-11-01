@@ -17,7 +17,7 @@
 //!    fait la « pompe » file → widgets dans le thread UI.
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::mpsc;
 
 use qtrs::prelude::*;
@@ -140,6 +140,30 @@ fn read_line_edit(ptr: *mut qtrs::ffi::QLineEdit) -> String {
     unsafe { qtrs::ffi::QLineEdit_text(ptr) }
 }
 
+
+/// Ecrit dans la barre de statut si le widget existe encore.
+/// Les callbacks capturent des `Weak` (jamais des `Rc`) : ils ne doivent pas
+/// prolonger la vie des widgets, sinon leurs wrappers ne sont detruits
+/// qu'APRES que Qt a libere les objets C++ -> « QObject::disconnect:
+/// wildcard call disconnects from destroyed signal » a la fermeture.
+fn set_status(w: &Weak<RefCell<Label>>, msg: &str) {
+    if let Some(s) = w.upgrade() {
+        s.borrow_mut().set_text(msg);
+    }
+}
+
+/// Ligne selectionnee du tableau (-1 si le widget n'existe plus).
+fn table_row(w: &Weak<RefCell<TableWidget>>) -> i32 {
+    w.upgrade().map(|t| t.borrow().current_row()).unwrap_or(-1)
+}
+
+/// Remet la barre de progression a zero si elle existe encore.
+fn reset_bar(w: &Weak<RefCell<ProgressBar>>) {
+    if let Some(b) = w.upgrade() {
+        b.borrow_mut().set_value(0);
+    }
+}
+
 /// Cherche l'icone de l'application (installee d'abord, puis locale au build).
 fn app_icon_path() -> Option<String> {
     for p in [
@@ -252,11 +276,11 @@ fn fill_table(ui: &Ui, models: Vec<Model>) {
 /// Lance un pull dans un thread, avec remontée de progression via `tx`.
 fn start_pull(
     tx: mpsc::Sender<WorkerMsg>,
-    status: Rc<RefCell<Label>>,
+    status: Weak<RefCell<Label>>,
     name: String,
     url: &str,
 ) {
-    status.borrow_mut().set_text(&format!("[{name}] démarrage…"));
+    set_status(&status, &format!("[{name}] démarrage…"));
     let name0 = name.clone();
     let url0 = url.to_string();
     std::thread::spawn(move || {
@@ -283,9 +307,9 @@ fn start_pull(
 fn refresh_list(
     tx: &mpsc::Sender<WorkerMsg>,
     url: &str,
-    status: &Rc<RefCell<Label>>,
+    status: &Weak<RefCell<Label>>,
 ) {
-    status.borrow_mut().set_text("Interrogation d'Ollama…");
+    set_status(status, "Interrogation d'Ollama…");
     let tx = tx.clone();
     let url = url.to_string();
     std::thread::spawn(move || {
@@ -387,23 +411,21 @@ fn build_ui(
     // Bouton « Tester » : lit le champ via le pointeur C++.
     let test_btn = PushButton::new("Tester")
         .on_clicked({
-            let status = status.clone();
+            let status = Rc::downgrade(&status);
             let api_p = api_ptr;
             move || {
                 let url = read_line_edit(url_ptr).trim().to_string();
                 apply_api_key_from(api_p);
                 if url.is_empty() {
-                    status.borrow_mut().set_text("Saisissez une adresse de serveur.");
+                    set_status(&status, "Saisissez une adresse de serveur.");
                     return;
                 }
-                status.borrow_mut().set_text("Test de connexion…");
+                set_status(&status, "Test de connexion…");
                 match get_version(&url) {
-                    Ok(v) => status
-                        .borrow_mut()
-                        .set_text(&format!("Connecté — Ollama version {v}")),
-                    Err(e) => status
-                        .borrow_mut()
-                        .set_text(&format!("Échec de connexion : {e}")),
+                    Ok(v) =>
+                        set_status(&status, &format!("Connecté — Ollama version {v}")),
+                    Err(e) =>
+                        set_status(&status, &format!("Échec de connexion : {e}")),
                 }
             }
         })
@@ -414,13 +436,13 @@ fn build_ui(
     // Bouton « Enregistrer » : persiste l'adresse puis recharge la liste.
     let save_btn = PushButton::new("Enregistrer")
         .on_clicked({
-            let status = status.clone();
+            let status = Rc::downgrade(&status);
             let tx = tx.clone();
             let api_p = api_ptr;
             move || {
                 let url = read_line_edit(url_ptr).trim().to_string();
                 if url.is_empty() {
-                    status.borrow_mut().set_text("Saisissez une adresse de serveur.");
+                    set_status(&status, "Saisissez une adresse de serveur.");
                     return;
                 }
                 let key = read_line_edit(api_p);
@@ -431,7 +453,7 @@ fn build_ui(
                 } else {
                     format!("Adresse et clé API enregistrées : {url}")
                 };
-                status.borrow_mut().set_text(&msg);
+                set_status(&status, &msg);
                 refresh_list(&tx, &url, &status);
             }
         })
@@ -465,20 +487,18 @@ fn build_ui(
     let download_btn = PushButton::new("Télécharger")
         .on_clicked({
             let tx = tx.clone();
-            let status = status.clone();
+            let status = Rc::downgrade(&status);
             let api_p = api_ptr;
             move || {
                 let name = read_line_edit(pull_ptr).trim().to_string();
                 apply_api_key_from(api_p);
                 if name.is_empty() {
-                    status.borrow_mut().set_text("Entrez un nom de modèle.");
+                    set_status(&status, "Entrez un nom de modèle.");
                     return;
                 }
                 let url = load_server_url();
                 if url.trim().is_empty() {
-                    status
-                        .borrow_mut()
-                        .set_text("Enregistrez d'abord l'adresse du serveur.");
+                    set_status(&status, "Enregistrez d'abord l'adresse du serveur.");
                     return;
                 }
                 start_pull(tx.clone(), status.clone(), name, &url);
@@ -503,13 +523,11 @@ fn build_ui(
     let refresh_btn = PushButton::new("Actualiser")
         .on_clicked({
             let tx = tx.clone();
-            let status = status.clone();
+            let status = Rc::downgrade(&status);
             move || {
                 let url = load_server_url();
                 if url.trim().is_empty() {
-                    status
-                        .borrow_mut()
-                        .set_text("Enregistrez d'abord l'adresse du serveur.");
+                    set_status(&status, "Enregistrez d'abord l'adresse du serveur.");
                     return;
                 }
                 refresh_list(&tx, &url, &status);
@@ -523,26 +541,25 @@ fn build_ui(
     let update_btn = PushButton::new("Mettre à jour")
         .on_clicked({
             let tx = tx.clone();
-            let status = status.clone();
+            let status = Rc::downgrade(&status);
             let models = models.clone();
-            let table_ref = table.clone();
+            let table_ref = Rc::downgrade(&table);
             move || {
-                let row = table_ref.borrow().current_row();
+                let row = table_row(&table_ref);
                 if row < 0 {
-                    status
-                        .borrow_mut()
-                        .set_text("Sélectionnez d'abord un modèle à mettre à jour.");
+                    set_status(
+                        &status,
+                        "Sélectionnez d'abord un modèle à mettre à jour.",
+                    );
                     return;
                 }
                 let Some(name) = models.borrow().get(row as usize).map(|m| m.name.clone()) else {
-                    status.borrow_mut().set_text("Ligne invalide.");
+                    set_status(&status, "Ligne invalide.");
                     return;
                 };
                 let url = load_server_url();
                 if url.trim().is_empty() {
-                    status
-                        .borrow_mut()
-                        .set_text("Enregistrez d'abord l'adresse du serveur.");
+                    set_status(&status, "Enregistrez d'abord l'adresse du serveur.");
                     return;
                 }
                 start_pull(tx.clone(), status.clone(), name, &url);
@@ -556,30 +573,24 @@ fn build_ui(
     let update_all_btn = PushButton::new("Tout mettre à jour")
         .on_clicked({
             let tx = tx.clone();
-            let status = status.clone();
+            let status = Rc::downgrade(&status);
             let models = models.clone();
             move || {
                 let names: Vec<String> =
                     models.borrow().iter().map(|m| m.name.clone()).collect();
                 if names.is_empty() {
-                    status
-                        .borrow_mut()
-                        .set_text("Aucun modèle local à mettre à jour.");
+                    set_status(&status, "Aucun modèle local à mettre à jour.");
                     return;
                 }
                 let url = load_server_url();
                 if url.trim().is_empty() {
-                    status
-                        .borrow_mut()
-                        .set_text("Enregistrez d'abord l'adresse du serveur.");
+                    set_status(&status, "Enregistrez d'abord l'adresse du serveur.");
                     return;
                 }
-                status
-                    .borrow_mut()
-                    .set_text(&format!(
-                        "Mise à jour de {} modèle(s)…",
-                        names.len()
-                    ));
+                set_status(
+                    &status,
+                    &format!("Mise à jour de {} modèle(s)…", names.len()),
+                );
                 let tx2 = tx.clone();
                 let url2 = url.clone();
                 std::thread::spawn(move || {
@@ -613,13 +624,13 @@ fn build_ui(
     let delete_btn = PushButton::new("Supprimer")
         .on_clicked({
             let tx = tx.clone();
-            let status = status.clone();
+            let status = Rc::downgrade(&status);
             let models = models.clone();
-            let table_ref = table.clone();
+            let table_ref = Rc::downgrade(&table);
             move || {
-                let row = table_ref.borrow().current_row();
+                let row = table_row(&table_ref);
                 let Some(name) = model_name_at(&models.borrow(), row) else {
-                    status.borrow_mut().set_text(if row < 0 {
+                    set_status(&status, if row < 0 {
                         "Sélectionnez d'abord un modèle à supprimer."
                     } else {
                         "Ligne invalide."
@@ -733,7 +744,8 @@ fn main() {
     {
         let url = load_server_url();
         if !url.trim().is_empty() {
-            refresh_list(&tx, &url, &ui.status);
+            let st = Rc::downgrade(&ui.status);
+            refresh_list(&tx, &url, &st);
         } else {
             ui.status
                 .borrow_mut()
@@ -749,10 +761,11 @@ fn main() {
     let tx2 = tx.clone();
     let _timer = Timer::new(200)
         .on_timeout({
-            let table = Rc::clone(&ui.table);
-            let bar = Rc::clone(&ui.bar);
-            let status = Rc::clone(&ui.status);
-            let models = Rc::clone(&ui.models);
+            // Weak pour les widgets : la pompe ne doit pas prolonger leur vie.
+            let table = Rc::downgrade(&ui.table);
+            let bar = Rc::downgrade(&ui.bar);
+            let status = Rc::downgrade(&ui.status);
+            let models = Rc::clone(&ui.models); // Vec, pas un widget
             move || {
                 while let Ok(msg) = rx.try_recv() {
                     match msg {
@@ -760,30 +773,31 @@ fn main() {
                             let parsed: Vec<Model> =
                                 serde_json::from_str(&payload).unwrap_or_default();
                             let count = parsed.len();
+                            let (Some(t), Some(b), Some(st)) =
+                                (table.upgrade(), bar.upgrade(), status.upgrade())
+                            else {
+                                continue;
+                            };
                             let ui_l = Ui {
-                                table: table.clone(),
-                                bar: bar.clone(),
-                                status: status.clone(),
+                                table: t,
+                                bar: b,
+                                status: st,
                                 models: models.clone(),
                             };
                             fill_table(&ui_l, parsed);
-                            status
-                                .borrow_mut()
-                                .set_text(&format!(
-                                    "{} modèle(s) chargé(s).",
-                                    count
-                                ));
+                            set_status(
+                                &status,
+                                &format!("{} modèle(s) chargé(s).", count),
+                            );
                         }
                         WorkerMsg::List(None, err) => {
-                            status
-                                .borrow_mut()
-                                .set_text(&format!("Erreur : {err}"));
+                            set_status(&status, &format!("Erreur : {err}"));
                         }
                         WorkerMsg::Progress { name, pct, status: st } => {
-                            bar.borrow_mut().set_value(pct as i32);
-                            status
-                                .borrow_mut()
-                                .set_text(&format!("[{name}] {st} — {pct}%"));
+                            if let Some(b) = bar.upgrade() {
+                                b.borrow_mut().set_value(pct as i32);
+                            }
+                            set_status(&status, &format!("[{name}] {st} — {pct}%"));
                         }
                         WorkerMsg::ActionDone { name, ok, message } => {
                             // PAS de boîte modale ici : ce code tourne dans le
@@ -793,11 +807,9 @@ fn main() {
                             // d'où le spam QObject::disconnect et l'action qui
                             // semblait ne pas aboutir). Le statut affiche le
                             // résultat, sans bloquer la pompe.
-                            bar.borrow_mut().set_value(0);
+                            reset_bar(&bar);
                             let mark = if ok { "✔" } else { "✘" };
-                            status
-                                .borrow_mut()
-                                .set_text(&format!("{mark} {name} : {message}"));
+                            set_status(&status, &format!("{mark} {name} : {message}"));
                             // Recharger la liste après une action réussie.
                             let url = load_server_url();
                             if ok && !url.trim().is_empty() {
@@ -824,7 +836,26 @@ fn main() {
         })
         .build();
 
+    // Crochet de test (inactif en usage normal) : ferme la fenetre apres N ms
+    // pour sortir de app.exec() par le meme chemin qu'un clic sur la croix.
+    let _auto_close = std::env::var("OM_AUTO_CLOSE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|ms| {
+            let w = Rc::clone(&window);
+            Timer::new(ms as i32)
+                .on_timeout(move || {
+                    w.borrow().close();
+                })
+                .build()
+        });
+
     app.exec();
+
+    // Les callbacks ne detiennent que des `Weak` : `ui` est le seul
+    // proprietaire des widgets, donc ses wrappers sont detruits AVANT que Qt
+    // libere les objets C++ (plus de « wildcard call disconnects from
+    // destroyed signal » a la fermeture).
 }
 
 // ------------------------------------------------------------------

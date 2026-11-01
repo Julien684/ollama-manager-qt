@@ -30,7 +30,7 @@ OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
 VERSION        = "0.1.0"
-RELEASE        = 9
+RELEASE        = 10
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
@@ -203,7 +203,14 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
             <Update release="{RELEASE}">
                 <Date>{today}</Date>
                 <Version>{VERSION}</Version>
-                <Comment>{PACKAGE_NAME} {VERSION} : bouton par defaut du dialogue fixe sur Oui (Entree valide la suppression de facon deterministe)</Comment>
+                <Comment>{PACKAGE_NAME} {VERSION} : plus de messages QObject::disconnect a la fermeture (les callbacks ne detiennent plus les widgets ; ils gardent des references faibles)</Comment>
+                <Name>{PACKAGER_NAME}</Name>
+                <Email>{PACKAGER_EMAIL}</Email>
+            </Update>
+            <Update release="9">
+                <Date>2026-11-01</Date>
+                <Version>{VERSION}</Version>
+                <Comment>{PACKAGE_NAME} {VERSION} : bouton par defaut du dialogue fixe sur Oui</Comment>
                 <Name>{PACKAGER_NAME}</Name>
                 <Email>{PACKAGER_EMAIL}</Email>
             </Update>
