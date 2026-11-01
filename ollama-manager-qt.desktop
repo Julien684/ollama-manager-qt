@@ -1,6 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Ollama Manager
+Name=Ollama Model Manager
+Name[fr]=Gestionnaire de modèles Ollama
 GenericName=Model Manager
 Comment=Download, update and remove Ollama models
 Comment[fr]=Télécharger, mettre à jour et supprimer des modèles Ollama

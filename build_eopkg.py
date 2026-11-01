@@ -30,7 +30,7 @@ OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
 VERSION        = "0.1.0"
-RELEASE        = 10
+RELEASE        = 11
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
@@ -72,8 +72,8 @@ OUT_FILENAME = f"{PACKAGE_NAME}-{VERSION}-{RELEASE}-{DIST_RELEASE}-{ARCH}.eopkg"
 
 # French metadata — accents preserved in UTF-8 (must NOT pass through the
 # ASCII-replacing helper `a()`).
-_FR_SUMMARY = ("Gestionnaire graphique (Qt6) d'Ollama - telecharger, mettre a "
-               "jour et supprimer des modeles")
+_FR_SUMMARY = ("Ollama Model Manager - gestionnaire graphique (Qt6) d'Ollama : "
+               "telecharger, mettre a jour et supprimer des modeles")
 _FR_DESCRIPTION = """ollama-manager-qt est un petit gestionnaire graphique (Qt6), ecrit en
 Rust, pour administrer un serveur Ollama : telechargement de modeles avec
 barre de progression en direct, mise a jour d'un modele ou de tous les
@@ -187,7 +187,7 @@ def build():
     </Source>
     <Package>
         <Name>{PACKAGE_NAME}</Name>
-        <Summary xml:lang="en">{a("Graphical Qt6 manager for Ollama - download, update and remove models")}</Summary>
+        <Summary xml:lang="en">{a("Ollama Model Manager - graphical Qt6 manager for Ollama: download, update and remove models")}</Summary>
         <Description xml:lang="en">{a("""ollama-manager-qt is a small graphical Qt6 manager, written in Rust
 (via qtrs), for administering an Ollama server: model download with a live
 progress bar, updating one model or all of them, removal with confirmation,
@@ -201,13 +201,13 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
         <License>GPL-3.0-or-later</License>
 {deps_xml}        <History>
             <Update release="{RELEASE}">
-                <Date>{today}</Date>
+                <Date>{date.today().isoformat()}</Date>
                 <Version>{VERSION}</Version>
-                <Comment>{PACKAGE_NAME} {VERSION} : plus de messages QObject::disconnect a la fermeture (les callbacks ne detiennent plus les widgets ; ils gardent des references faibles)</Comment>
+                <Comment>{PACKAGE_NAME} {VERSION} : renommage en « Ollama Model Manager » (titre de fenetre et entree de menu)</Comment>
                 <Name>{PACKAGER_NAME}</Name>
                 <Email>{PACKAGER_EMAIL}</Email>
             </Update>
-            <Update release="9">
+            <Update release="10">
                 <Date>2026-11-01</Date>
                 <Version>{VERSION}</Version>
                 <Comment>{PACKAGE_NAME} {VERSION} : bouton par defaut du dialogue fixe sur Oui</Comment>

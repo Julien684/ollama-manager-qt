@@ -1,4 +1,4 @@
-//! Ollama Manager — GUI Qt6 (via `qtrs`), binaire unique.
+//! Ollama Model Manager — GUI Qt6 (via `qtrs`), binaire unique.
 //!
 //! Télécharge, met à jour et supprime des modèles Ollama. L'adresse du
 //! serveur est configurable au lancement et persistée (QSettings).
@@ -201,7 +201,7 @@ fn confirm(text: &str) -> bool {
     let mb = MessageBox::new()
         .icon(3) // Question
         .text(text)
-        .window_title("Ollama Manager")
+        .window_title("Ollama Model Manager")
         .standard_buttons(BTN_YES | BTN_CANCEL)
         // Bouton par defaut explicite : sans cela, selon le style Qt, la touche
         // Entree peut activer « Annuler » et annuler la suppression.
@@ -723,7 +723,7 @@ fn main() {
 
     let window = Rc::new(RefCell::new(
         MainWindow::new()
-            .window_title("Ollama Manager")
+            .window_title("Ollama Model Manager")
             .size(1020, 640)
             .build(),
     ));
