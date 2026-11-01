@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff5a4e"/>
+      <stop offset="1" stop-color="#c62b22"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd35a"/>
+      <stop offset="0.55" stop-color="#e89b1c"/>
+      <stop offset="1" stop-color="#b06e00"/>
+    </linearGradient>
+    <linearGradient id="gold2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe08a"/>
+      <stop offset="1" stop-color="#d48a10"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Halo discret pour lisibilité sur fonds clairs/sombres -->
+  <circle cx="128" cy="124" r="104" fill="#ffffff" opacity="0.0"/>
+
+  <!-- ============ LOGO OLLAMA (roue / hemisphère dentée) ============ -->
+  <g id="gear" transform="translate(128,120)">
+    <!-- 8 dents -->
+    <g fill="url(#red)">
+      <rect x="-16" y="-96" width="32" height="40" rx="7" transform="rotate(0)"/>
+      <rect x="-16" y="-96" width="32" height="40" rx="7" transform="rotate(45)"/>
+      <rect x="-16" y="-96" width="32" height="40" rx="7" transform="rotate(90)"/>
+      <rect x="-16" y="-96" width="32" height="40" rx="7" transform="rotate(135)"/>
+      <rect x="-16" y="-96" width="32" height="40" rx="7" transform="rotate(180)"/>
+      <rect x="-16" y="-96" width="32" height="40" rx="7" transform="rotate(225)"/>
+      <rect x="-16" y="-96" width="32" height="40" rx="7" transform="rotate(270)"/>
+      <rect x="-16" y="-96" width="32" height="40" rx="7" transform="rotate(315)"/>
+    </g>
+    <!-- Corps de la roue -->
+    <circle cx="0" cy="0" r="80" fill="url(#red)"/>
+    <!-- Relief haut -->
+    <path d="M -78 0 A 78 78 0 0 1 78 0 Z" fill="#ffffff" opacity="0.14"/>
+    <!-- Oeil -->
+    <circle cx="0" cy="-6" r="30" fill="#ffffff"/>
+    <circle cx="0" cy="-6" r="30" fill="none" stroke="#00000030" stroke-width="2"/>
+    <circle cx="0" cy="-4" r="13" fill="#1c1c1e"/>
+    <circle cx="-5" cy="-9" r="4" fill="#ffffff" opacity="0.9"/>
+    <!-- Bouche (sourire) -->
+    <path d="M -34 26 Q 0 52 34 26" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+  </g>
+
+  <!-- ============ CLE A MOLETTE (diagonale, par-dessus) ============ -->
+  <!-- Ombre portee de la cle sur la roue (sous la cle) -->
+  <ellipse cx="136" cy="198" rx="88" ry="12" fill="#000" opacity="0.16"/>
+  <g id="wrench" transform="translate(124,124) rotate(48) scale(0.82)">
+    <!-- manche -->
+    <rect x="-118" y="-13" width="176" height="26" rx="13" fill="url(#gold)" stroke="#8a5a00" stroke-width="2.5"/>
+    <!-- reflet manche -->
+    <rect x="-112" y="-9" width="162" height="7" rx="3.5" fill="#ffffff" opacity="0.28"/>
+    <!-- oeil (cote creuse) a gauche -->
+    <g transform="translate(-138,0)">
+      <circle cx="0" cy="0" r="34" fill="url(#gold)" stroke="#8a5a00" stroke-width="2.5"/>
+      <path d="M -22 -16 A 26 26 0 1 0 22 -16 L 10 -28 L -10 -28 Z" fill="url(#gold2)" stroke="#8a5a00" stroke-width="2"/>
+      <circle cx="0" cy="4" r="17" fill="#b8471f"/>
+      <circle cx="0" cy="4" r="17" fill="none" stroke="#7a2f10" stroke-width="2"/>
+    </g>
+    <!-- pointe (cote ouverte) a droite : U -->
+    <g transform="translate(74,0)">
+      <path d="M 0 -30
+               L 34 -30
+               L 34 -14
+               L 16 -14
+               L 16 14
+               L 34 14
+               L 34 30
+               L 0 30 Z"
+            fill="url(#gold)" stroke="#8a5a00" stroke-width="2.5" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

@@ -344,12 +344,17 @@ fn build_ui(
     // ---- Télécharger un modèle ----------------------------------------------
     let dl_box =
         GroupBox::new("Télécharger un modèle").parent(&central).build();
+    // Layout VERTICAL pour le GroupBox (c'était ce qui manquait : le dl_row
+    // était enfant du GroupBox mais sans layout parent, donc invisible).
+    let mut dl_outer = VBoxLayout::with_parent(&dl_box);
+    dl_outer.set_spacing(8);
+
     let dl_row = Widget::new().parent(&dl_box).build();
     let mut dl_l = HBoxLayout::with_parent(&dl_row);
     dl_l.set_spacing(8);
 
-    // Un bouton « Télécharger » suffit : il lit le champ ci-contre.
-    let pull_edit = LineEdit::new("").parent(&dl_row).build();
+    // Placeholder : aide l'utilisateur à saisir le nom du modèle.
+    let pull_edit = LineEdit::new("ex : llama3.2:3b").parent(&dl_row).build();
     let pull_ptr = pull_edit.widget_ptr() as *mut qtrs::ffi::QLineEdit;
     dl_l.add(pull_edit);
 
@@ -376,6 +381,7 @@ fn build_ui(
         .parent(&dl_row)
         .build();
     dl_l.add(download_btn);
+    dl_outer.add(dl_row);
     root.add(dl_box);
 
     // ---- Modèles locaux ------------------------------------------------------

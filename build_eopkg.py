@@ -30,7 +30,7 @@ OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
 VERSION        = "0.1.0"
-RELEASE        = 1
+RELEASE        = 2
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
@@ -52,6 +52,13 @@ FILE_LIST = [
     ("usr/share/licenses/ollama-manager-qt/LICENSE",
      "LICENSE", 0o644),
 ]
+# Icones hicolor : le .desktop pointe sur « ollama-manager-qt », le thème
+# hicolor fournit toutes les tailles.
+for _px in (24, 32, 48, 64, 128, 256):
+    FILE_LIST.append((
+        f"usr/share/icons/hicolor/{_px}x{_px}/apps/ollama-manager-qt.png",
+        f"icons/ollama-manager-qt-{_px}.png", 0o644,
+    ))
 
 # Runtime dependencies: qt6-base is system-provided on any Solus desktop and
 # `eopkg install <url>` cannot resolve deps anyway — documented in README.
@@ -189,8 +196,15 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
         <PartOf>{PART_OF}</PartOf>
         <License>GPL-3.0-or-later</License>
 {deps_xml}        <History>
-            <Update release="1">
+            <Update release="{RELEASE}">
                 <Date>{today}</Date>
+                <Version>{VERSION}</Version>
+                <Comment>{PACKAGE_NAME} {VERSION} : correctifs - SIGSEGV a la fermeture, timer de pompage, libelle du champ serveur, champ de téléchargement rendus visibles, icone application (logo Ollama + cle a molette), persistance config INI</Comment>
+                <Name>{PACKAGER_NAME}</Name>
+                <Email>{PACKAGER_EMAIL}</Email>
+            </Update>
+            <Update release="1">
+                <Date>2026-11-01</Date>
                 <Version>{VERSION}</Version>
                 <Comment>{PACKAGE_NAME} {VERSION} : version initiale - GUI Qt6 (téléchargement / mise à jour / suppression de modèles Ollama, adresse serveur persistée)</Comment>
                 <Name>{PACKAGER_NAME}</Name>
