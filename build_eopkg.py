@@ -30,7 +30,7 @@ OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
 VERSION        = "0.1.0"
-RELEASE        = 8
+RELEASE        = 9
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
@@ -203,7 +203,14 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
             <Update release="{RELEASE}">
                 <Date>{today}</Date>
                 <Version>{VERSION}</Version>
-                <Comment>{PACKAGE_NAME} {VERSION} : dialogue de confirmation corrige (Oui / Annuler - le bouton renvoyait Ok=0x400 alors que le code attendait Oui=0x4000, ce qui annulait la suppression), barre de progression pleine largeur entre la liste et les logs, logs pleine largeur</Comment>
+                <Comment>{PACKAGE_NAME} {VERSION} : bouton par defaut du dialogue fixe sur Oui (Entree valide la suppression de facon deterministe)</Comment>
+                <Name>{PACKAGER_NAME}</Name>
+                <Email>{PACKAGER_EMAIL}</Email>
+            </Update>
+            <Update release="8">
+                <Date>2026-11-01</Date>
+                <Version>{VERSION}</Version>
+                <Comment>{PACKAGE_NAME} {VERSION} : dialogue Oui/Annuler (Ok=0x400 annulait la suppression), barre de progression et logs pleine largeur</Comment>
                 <Name>{PACKAGER_NAME}</Name>
                 <Email>{PACKAGER_EMAIL}</Email>
             </Update>

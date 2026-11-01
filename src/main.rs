@@ -179,6 +179,9 @@ fn confirm(text: &str) -> bool {
         .text(text)
         .window_title("Ollama Manager")
         .standard_buttons(BTN_YES | BTN_CANCEL)
+        // Bouton par defaut explicite : sans cela, selon le style Qt, la touche
+        // Entree peut activer « Annuler » et annuler la suppression.
+        .default_button(BTN_YES)
         .build();
     mb.exec() == BTN_YES
 }
