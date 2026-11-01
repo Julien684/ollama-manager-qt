@@ -140,7 +140,7 @@ struct Layouts {
     #[allow(dead_code)]
     srv: HBoxLayout,
     #[allow(dead_code)]
-    dl: HBoxLayout,
+    dl: GridLayout,
     #[allow(dead_code)]
     actions: HBoxLayout,
     #[allow(dead_code)]
@@ -344,19 +344,21 @@ fn build_ui(
     // ---- Télécharger un modèle ----------------------------------------------
     let dl_box =
         GroupBox::new("Télécharger un modèle").parent(&central).build();
-    // Layout VERTICAL pour le GroupBox (c'était ce qui manquait : le dl_row
-    // était enfant du GroupBox mais sans layout parent, donc invisible).
-    let mut dl_outer = VBoxLayout::with_parent(&dl_box);
-    dl_outer.set_spacing(8);
+    // GridLayout pose directement sur le GroupBox : les enfants sont ajoutes au
+    // grid lui-meme. Un `Widget` intermediaire (avec son propre HBoxLayout)
+    // ajoute a la VBox du GroupBox ne s'affichait pas du tout (section vide).
+    let mut dl_g = GridLayout::with_parent(&dl_box);
 
-    let dl_row = Widget::new().parent(&dl_box).build();
-    let mut dl_l = HBoxLayout::with_parent(&dl_row);
-    dl_l.set_spacing(8);
+    let dl_title =
+        Label::new("Nom du modèle à télécharger (ex : llama3.2:3b)")
+            .parent(&dl_box)
+            .build();
+    dl_g.add(dl_title, 0, 0, 1, 2);
 
-    // Placeholder : aide l'utilisateur à saisir le nom du modèle.
-    let pull_edit = LineEdit::new("ex : llama3.2:3b").parent(&dl_row).build();
+    // Placeholder : le champ doit montrer ce qu'on attend avant toute saisie.
+    let pull_edit = LineEdit::new("ex : llama3.2:3b").parent(&dl_box).build();
     let pull_ptr = pull_edit.widget_ptr() as *mut qtrs::ffi::QLineEdit;
-    dl_l.add(pull_edit);
+    dl_g.add(pull_edit, 1, 0, 1, 1);
 
     let download_btn = PushButton::new("Télécharger")
         .on_clicked({
@@ -378,10 +380,9 @@ fn build_ui(
                 start_pull(tx.clone(), status.clone(), name, &url);
             }
         })
-        .parent(&dl_row)
+        .parent(&dl_box)
         .build();
-    dl_l.add(download_btn);
-    dl_outer.add(dl_row);
+    dl_g.add(download_btn, 1, 1, 1, 1);
     root.add(dl_box);
 
     // ---- Modèles locaux ------------------------------------------------------
@@ -568,7 +569,7 @@ fn build_ui(
     let layouts = Layouts {
         root,
         srv: srv_l,
-        dl: dl_l,
+        dl: dl_g,
         actions: actions_l,
         modbox: mod_l,
         bar_row: bar_l,

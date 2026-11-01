@@ -30,7 +30,7 @@ OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
 VERSION        = "0.1.0"
-RELEASE        = 2
+RELEASE        = 3
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
@@ -199,7 +199,14 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
             <Update release="{RELEASE}">
                 <Date>{today}</Date>
                 <Version>{VERSION}</Version>
-                <Comment>{PACKAGE_NAME} {VERSION} : correctifs - SIGSEGV a la fermeture, timer de pompage, libelle du champ serveur, champ de téléchargement rendus visibles, icone application (logo Ollama + cle a molette), persistance config INI</Comment>
+                <Comment>{PACKAGE_NAME} {VERSION} : champ de telechargement reellement visible (GridLayout : libelle + champ + bouton), nouvelle icone application (lama blanc avec cle a molette)</Comment>
+                <Name>{PACKAGER_NAME}</Name>
+                <Email>{PACKAGER_EMAIL}</Email>
+            </Update>
+            <Update release="2">
+                <Date>2026-11-01</Date>
+                <Version>{VERSION}</Version>
+                <Comment>{PACKAGE_NAME} {VERSION} : correctifs - SIGSEGV a la fermeture, timer de pompage, libelle du champ serveur, persistance config INI</Comment>
                 <Name>{PACKAGER_NAME}</Name>
                 <Email>{PACKAGER_EMAIL}</Email>
             </Update>
