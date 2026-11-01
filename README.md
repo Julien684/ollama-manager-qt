@@ -3,6 +3,8 @@
 **Ollama Model Manager** — gestionnaire graphique **Qt6** d'Ollama, binaire
 unique en **Rust** (via la crate [`qtrs`](https://github.com/mateuszwq/qtrs)).
 
+![Capture d'écran d'Ollama Model Manager](screenshot.png)
+
 Télécharge, met à jour et supprime des modèles Ollama depuis une interface
 native. L'adresse du serveur est configurable au lancement et **persistée**
 (`QSettings`, `~/.config/OllamaManager/ollama-manager-qt.ini`).
@@ -36,7 +38,7 @@ Paquet `.eopkg` fourni dans ce dépôt :
 
 ```bash
 sudo eopkg install -y \
-  https://raw.githubusercontent.com/Julien684/ollama-manager-qt/main/ollama-manager-qt-0.1.0-11-1-x86_64.eopkg
+  https://raw.githubusercontent.com/Julien684/ollama-manager-qt/main/ollama-manager-qt-0.1.0-12-1-x86_64.eopkg
 ```
 
 Ou depuis le dépôt binaire personnel : `sudo eopkg install -y ollama-manager-qt`
@@ -84,6 +86,8 @@ GPL-3.0-or-later
 **Ollama Model Manager** — a graphical **Qt6** manager for Ollama, a single
 binary written in **Rust** (via the [`qtrs`](https://github.com/mateuszwq/qtrs) crate).
 
+![Ollama Model Manager screenshot](screenshot.png)
+
 Download, update and remove Ollama models from a native interface. The server
 address is configurable at startup and **persisted**
 (`QSettings`, `~/.config/OllamaManager/ollama-manager-qt.ini`).
@@ -115,7 +119,7 @@ The `.eopkg` package is provided in this repository:
 
 ```bash
 sudo eopkg install -y \
-  https://raw.githubusercontent.com/Julien684/ollama-manager-qt/main/ollama-manager-qt-0.1.0-11-1-x86_64.eopkg
+  https://raw.githubusercontent.com/Julien684/ollama-manager-qt/main/ollama-manager-qt-0.1.0-12-1-x86_64.eopkg
 ```
 
 Or from the personal binary repository: `sudo eopkg install -y ollama-manager-qt`
