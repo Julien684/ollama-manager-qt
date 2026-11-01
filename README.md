@@ -36,11 +36,11 @@ Paquet `.eopkg` fourni dans ce dépôt :
 
 ```bash
 sudo eopkg install -y \
-  https://depoa.julien68.fr/Linuxon/ollama-manager-qt/raw/branch/main/ollama-manager-qt-0.1.0-11-1-x86_64.eopkg
+  https://raw.githubusercontent.com/Julien684/ollama-manager-qt/main/ollama-manager-qt-0.1.0-11-1-x86_64.eopkg
 ```
 
 Ou depuis le dépôt binaire personnel : `sudo eopkg install -y ollama-manager-qt`
-(dépôt `linuxon` — voir `Linuxon/eopkg-repo`). Seul prérequis : `qt6-base`
+(dépôt `linuxon` — voir `Julien684/eopkg-repo`). Seul prérequis : `qt6-base`
 (fourni par le système Solus).
 
 ## Tests
@@ -115,11 +115,11 @@ The `.eopkg` package is provided in this repository:
 
 ```bash
 sudo eopkg install -y \
-  https://depoa.julien68.fr/Linuxon/ollama-manager-qt/raw/branch/main/ollama-manager-qt-0.1.0-11-1-x86_64.eopkg
+  https://raw.githubusercontent.com/Julien684/ollama-manager-qt/main/ollama-manager-qt-0.1.0-11-1-x86_64.eopkg
 ```
 
 Or from the personal binary repository: `sudo eopkg install -y ollama-manager-qt`
-(the `linuxon` repo — see `Linuxon/eopkg-repo`). Only prerequisite: `qt6-base`
+(the `linuxon` repo — see `Julien684/eopkg-repo`). Only prerequisite: `qt6-base`
 (provided by the Solus system).
 
 ## Tests
