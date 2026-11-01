@@ -63,11 +63,12 @@ fn config_path() -> std::path::PathBuf {
     base.join(".config").join(SETTINGS_ORG).join(format!("{SETTINGS_APP}.ini"))
 }
 
-/// Parse la clé `serverUrl` d'un contenu INI Qt. Testable sans GUI.
-pub fn parse_ini_server_url(content: &str) -> Option<String> {
+/// Parse une clé quelconque d'un contenu INI Qt. Testable sans GUI.
+pub fn parse_ini_key(content: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
     for line in content.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("serverUrl=") {
+        if let Some(rest) = line.strip_prefix(&prefix) {
             let v = rest.trim();
             // QSettings encadre les valeurs contenant `:`, `/` ou espaces
             // dans des guillemets « ... ».
@@ -80,23 +81,58 @@ pub fn parse_ini_server_url(content: &str) -> Option<String> {
     None
 }
 
-fn load_server_url() -> String {
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|c| parse_ini_server_url(&c))
-        .unwrap_or_default()
+/// Parse la clé `serverUrl` d'un contenu INI Qt. Testable sans GUI.
+pub fn parse_ini_server_url(content: &str) -> Option<String> {
+    parse_ini_key(content, "serverUrl")
 }
 
-fn save_server_url(url: &str) {
+/// Parse la clé `apiKey` (clé API facultative) d'un contenu INI Qt.
+pub fn parse_ini_api_key(content: &str) -> Option<String> {
+    parse_ini_key(content, "apiKey")
+}
+
+/// Lit (URL du serveur, clé API) depuis la configuration.
+fn load_config() -> (String, String) {
+    let content = std::fs::read_to_string(config_path()).unwrap_or_default();
+    (
+        parse_ini_server_url(&content).unwrap_or_default(),
+        parse_ini_api_key(&content).unwrap_or_default(),
+    )
+}
+
+fn load_server_url() -> String {
+    load_config().0
+}
+
+/// Échappe une valeur pour un fichier INI façon QSettings.
+fn ini_value(raw: &str) -> String {
+    let escaped = raw.replace('"', "\\\"").replace('\\', "\\\\");
+    let need_escape = raw.contains(&['"', '\\', ' ', ':', '['][..]);
+    if need_escape {
+        format!("\"{escaped}\"")
+    } else {
+        escaped
+    }
+}
+
+/// Écrit l'URL ET la clé API (une clé vide retire la ligne `apiKey`).
+fn save_config(url: &str, api_key: &str) {
     let path = config_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Échappement minimal des caractères spéciaux QSettings.
-    let escaped = url.replace('"', "\\\"").replace('\\', "\\\\");
-    let need_escape = url.contains(&['"', '\\', ' ', ':', '['][..]);
-    let val = if need_escape { format!("\"{escaped}\"") } else { escaped };
-    let _ = std::fs::write(&path, format!("[General]\nserverUrl={val}\n"));
+    let mut out = String::from("[General]\n");
+    out.push_str(&format!("serverUrl={}\n", ini_value(url)));
+    if !api_key.trim().is_empty() {
+        out.push_str(&format!("apiKey={}\n", ini_value(api_key.trim())));
+    }
+    let _ = std::fs::write(&path, out);
+}
+
+/// Applique au client HTTP la clé API saisie dans un champ (vide = aucune).
+fn apply_api_key_from(ptr: *mut qtrs::ffi::QLineEdit) {
+    let key = read_line_edit(ptr);
+    ollama::set_api_key(Some(key));
 }
 
 /// Lit le texte courant d'un `QLineEdit` via son pointeur C++.
@@ -153,6 +189,8 @@ struct Layouts {
     root: VBoxLayout,
     #[allow(dead_code)]
     srv: HBoxLayout,
+    #[allow(dead_code)]
+    api: HBoxLayout,
     #[allow(dead_code)]
     dl: GridLayout,
     #[allow(dead_code)]
@@ -291,6 +329,21 @@ fn build_ui(
     root.set_contents_margins(12, 12, 12, 12);
     root.set_spacing(10);
 
+    // ---- Clé API facultative (créée tôt pour être lue par « Tester ») ------
+    let api_title = Label::new(
+        "Clé API (facultative — laisser vide si le serveur n'en exige pas)",
+    )
+    .parent(&central)
+    .build();
+    let api_row = Widget::new().parent(&central).build();
+    let mut api_l = HBoxLayout::with_parent(&api_row);
+    api_l.set_spacing(8);
+    let saved_key = load_config().1;
+    let api_edit = LineEdit::new(&saved_key).parent(&api_row).build();
+    api_edit.set_echo_mode(2); // 2 = Password : la clé n'est pas affichée
+    let api_ptr = api_edit.widget_ptr() as *mut qtrs::ffi::QLineEdit;
+    api_l.add(api_edit);
+
     // ---- Ligne serveur : [ QLineEdit | Tester | Enregistrer ] --------------
     // Titre du champ : sans lui l'utilisateur ne sait pas quoi y saisir.
     let srv_title =
@@ -311,8 +364,10 @@ fn build_ui(
     let test_btn = PushButton::new("Tester")
         .on_clicked({
             let status = status.clone();
+            let api_p = api_ptr;
             move || {
                 let url = read_line_edit(url_ptr).trim().to_string();
+                apply_api_key_from(api_p);
                 if url.is_empty() {
                     status.borrow_mut().set_text("Saisissez une adresse de serveur.");
                     return;
@@ -337,15 +392,22 @@ fn build_ui(
         .on_clicked({
             let status = status.clone();
             let tx = tx.clone();
+            let api_p = api_ptr;
             move || {
                 let url = read_line_edit(url_ptr).trim().to_string();
                 if url.is_empty() {
                     status.borrow_mut().set_text("Saisissez une adresse de serveur.");
                     return;
                 }
-                save_server_url(&url);
-                status.borrow_mut()
-                    .set_text(&format!("Adresse enregistrée : {url}"));
+                let key = read_line_edit(api_p);
+                save_config(&url, &key);
+                ollama::set_api_key(Some(key.clone()));
+                let msg = if key.trim().is_empty() {
+                    format!("Adresse enregistrée : {url} (sans clé API)")
+                } else {
+                    format!("Adresse et clé API enregistrées : {url}")
+                };
+                status.borrow_mut().set_text(&msg);
                 refresh_list(&tx, &url, &status);
             }
         })
@@ -354,6 +416,8 @@ fn build_ui(
     srv_l.add(save_btn);
 
     root.add(srv_row);
+    root.add(api_title);
+    root.add(api_row);
 
     // ---- Télécharger un modèle ----------------------------------------------
     let dl_box =
@@ -378,8 +442,10 @@ fn build_ui(
         .on_clicked({
             let tx = tx.clone();
             let status = status.clone();
+            let api_p = api_ptr;
             move || {
                 let name = read_line_edit(pull_ptr).trim().to_string();
+                apply_api_key_from(api_p);
                 if name.is_empty() {
                     status.borrow_mut().set_text("Entrez un nom de modèle.");
                     return;
@@ -587,6 +653,7 @@ fn build_ui(
     let layouts = Layouts {
         root,
         srv: srv_l,
+        api: api_l,
         dl: dl_g,
         actions: actions_l,
         modbox: mod_l,
@@ -608,6 +675,8 @@ fn main() {
     // Indispensable sous Wayland/KDE : associe la fenetre au .desktop pour que
     // le compositeur affiche son icone dans le sélecteur de taches.
     app.set_desktop_file_name("ollama-manager-qt");
+    // Clé API enregistrée : appliquée à toutes les requêtes HTTP.
+    ollama::set_api_key(Some(load_config().1));
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
 
     let window = Rc::new(RefCell::new(
@@ -734,6 +803,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ini_api_key_simple() {
+        assert_eq!(
+            parse_ini_api_key("[General]\nserverUrl=http://x:11434\napiKey=sk-abc123\n"),
+            Some("sk-abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn ini_api_key_absente() {
+        // Pas de ligne apiKey => None (clé facultative).
+        assert_eq!(
+            parse_ini_api_key("[General]\nserverUrl=http://x:11434\n"),
+            None
+        );
+    }
 
     #[test]
     fn ini_url_simple() {

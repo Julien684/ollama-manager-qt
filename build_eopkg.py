@@ -30,7 +30,7 @@ OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
 VERSION        = "0.1.0"
-RELEASE        = 4
+RELEASE        = 5
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
@@ -203,7 +203,14 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
             <Update release="{RELEASE}">
                 <Date>{today}</Date>
                 <Version>{VERSION}</Version>
-                <Comment>{PACKAGE_NAME} {VERSION} : icone resolue par le menu (icone installee dans /usr/share/pixmaps + Icon= absolu, set_icon/set_desktop_file_name cote app), zone barre de progression + logs limitee en hauteur</Comment>
+                <Comment>{PACKAGE_NAME} {VERSION} : cle API facultative (champ masque, persistee en INI, envoyee en Authorization: Bearer sur toutes les requetes)</Comment>
+                <Name>{PACKAGER_NAME}</Name>
+                <Email>{PACKAGER_EMAIL}</Email>
+            </Update>
+            <Update release="4">
+                <Date>2026-11-01</Date>
+                <Version>{VERSION}</Version>
+                <Comment>{PACKAGE_NAME} {VERSION} : icone resolue par le menu (pixmaps + Icon= absolu, set_icon/set_desktop_file_name), zone progression/logs compacte</Comment>
                 <Name>{PACKAGER_NAME}</Name>
                 <Email>{PACKAGER_EMAIL}</Email>
             </Update>

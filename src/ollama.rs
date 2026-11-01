@@ -5,6 +5,7 @@
 //! (NDJSON) et reporté via un callback de progression.
 
 use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
 
 /// En-tête User-Agent simple (certains proxies exigent un UA).
 const UA: &str = "ollama-manager-qt/0.1";
@@ -102,12 +103,45 @@ type Result<T> = std::result::Result<T, OllamaError>;
 
 fn agent(_base: &str) -> ureq::Agent {
     // Timeout global généreux (connect + read + write) ; un pull peut durer
-    // longtemps mais chaque *chunk* lu en chemin réarmé le timer de lecture.
+    // longtemps mais chaque *chunk* lu en chemin réarme le timer de lecture.
     let d = std::time::Duration::from_secs(120);
     ureq::AgentBuilder::new()
         .timeout(d)
         .user_agent(UA)
         .build()
+}
+
+// ----------------------------------------------------------------------
+// Clé API facultative (Ollama Cloud / proxy authentifié)
+// ----------------------------------------------------------------------
+
+/// Clé API courante ; `None` = aucune authentification envoyée.
+static API_KEY: RwLock<Option<String>> = RwLock::new(None);
+
+/// Valeur de l'en-tête `Authorization` pour une clé brute (testable).
+/// Une clé vide ou faite d'espaces n'authentifie rien.
+fn auth_header_value(key: &str) -> Option<String> {
+    let k = key.trim();
+    if k.is_empty() {
+        None
+    } else {
+        Some(format!("Bearer {k}"))
+    }
+}
+
+/// Configure la clé API (chaîne vide/espaces => désactive l'authentification).
+pub fn set_api_key(key: Option<String>) {
+    let cleaned = key.and_then(|k| auth_header_value(&k).map(|_| k.trim().to_string()));
+    *API_KEY.write().unwrap() = cleaned;
+}
+
+/// Applique `Authorization: Bearer …` si une clé est configurée.
+fn with_auth(req: ureq::Request) -> ureq::Request {
+    let guard = API_KEY.read().unwrap();
+    match guard.as_deref().and_then(auth_header_value) {
+        Some(v) => req.set("Authorization", &v),
+        None => req,
+    }
 }
 
 fn normalize_url(base: &str) -> String {
@@ -150,8 +184,7 @@ fn map_ureq_err(_base: &str, e: ureq::Error) -> OllamaError {
 
 /// `GET /api/version` — vérifie que le serveur répond.
 pub fn get_version(base: &str) -> Result<String> {
-    let r = agent(base)
-        .get(&url(base, "/api/version"))
+    let r = with_auth(agent(base).get(&url(base, "/api/version")))
         .call()
         .map_err(|e| map_ureq_err(base, e))?;
     let v: Version = r
@@ -162,8 +195,7 @@ pub fn get_version(base: &str) -> Result<String> {
 
 /// `GET /api/tags` — liste les modèles locaux.
 pub fn list_models(base: &str) -> Result<Vec<Model>> {
-    let r = agent(base)
-        .get(&url(base, "/api/tags"))
+    let r = with_auth(agent(base).get(&url(base, "/api/tags")))
         .call()
         .map_err(|e| map_ureq_err(base, e))?;
     let t: TagsResp = r
@@ -188,11 +220,13 @@ pub fn list_models(base: &str) -> Result<Vec<Model>> {
 /// Note : Ollama >= 0.40 veut une requête DELETE avec body JSON
 /// (`POST /api/delete` renvoie 405).
 pub fn delete_model(base: &str, name: &str) -> Result<()> {
-    agent(base)
-        .delete(&url(base, "/api/delete"))
-        .set("Content-Type", "application/json")
-        .send_json(serde_json::json!({ "name": name }))
-        .map_err(|e| map_ureq_err(base, e))?;
+    with_auth(
+        agent(base)
+            .delete(&url(base, "/api/delete"))
+            .set("Content-Type", "application/json"),
+    )
+    .send_json(serde_json::json!({ "name": name }))
+    .map_err(|e| map_ureq_err(base, e))?;
     Ok(())
 }
 
@@ -207,11 +241,13 @@ pub fn pull_model(
     mut progress: impl FnMut(u32, &str),
 ) -> Result<()> {
     let body = serde_json::json!({ "name": name, "stream": true }).to_string();
-    let resp = agent(base)
-        .post(&url(base, "/api/pull"))
-        .set("Content-Type", "application/json")
-        .send_string(&body)
-        .map_err(|e| map_ureq_err(base, e))?;
+    let resp = with_auth(
+        agent(base)
+            .post(&url(base, "/api/pull"))
+            .set("Content-Type", "application/json"),
+    )
+    .send_string(&body)
+    .map_err(|e| map_ureq_err(base, e))?;
 
     let mut stream = resp.into_reader();
     let mut buf: Vec<u8> = Vec::new();
@@ -413,6 +449,50 @@ mod tests {
     }
 
     // ---- Calcul de progression ---------------------------------------------
+
+    #[test]
+    fn requete_porte_la_cle_api() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        // Serveur minimal qui capture la requete et repond un JSON valide.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = "{\"version\":\"0.9.9\"}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s.write_all(resp.as_bytes()).unwrap();
+            req
+        });
+
+        set_api_key(Some("sk-test-123".to_string()));
+        let v = get_version(&format!("http://127.0.0.1:{port}")).unwrap();
+        let req = h.join().unwrap();
+        set_api_key(None);
+
+        assert_eq!(v, "0.9.9");
+        assert!(
+            req.to_lowercase().contains("authorization: bearer sk-test-123"),
+            "en-tete Authorization absent de la requete:\n{req}"
+        );
+    }
+
+    #[test]
+    fn auth_header_value_tests() {
+        assert_eq!(auth_header_value("abc123").as_deref(), Some("Bearer abc123"));
+        // Les espaces autour sont ignorés.
+        assert_eq!(auth_header_value("  abc  ").as_deref(), Some("Bearer abc"));
+        // Vide ou blanc => pas d'authentification.
+        assert_eq!(auth_header_value(""), None);
+        assert_eq!(auth_header_value("   "), None);
+    }
 
     #[test]
     fn calcul_pct() {
