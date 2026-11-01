@@ -212,6 +212,8 @@ struct Layouts {
     modbox: VBoxLayout,
     #[allow(dead_code)]
     bar_row: HBoxLayout,
+    #[allow(dead_code)]
+    bar_cell: VBoxLayout,
     /// Widget central sans parent : SANS lui, qtrs supprime le C++ du widget
     /// (donc toute la sous-arborescence) à la fin de `build_ui` → segfault dans
     /// `app.exec()`. Doit vivre aussi longtemps que la fenêtre.
@@ -651,7 +653,15 @@ fn build_ui(
     bar_row.set_min_size(0, 92);
     let mut bar_l = HBoxLayout::with_parent(&bar_row);
     bar_l.set_spacing(10);
-    bar_l.add(wrap_scroll(&bar, wp));
+    // Cellule gauche : la barre est centree verticalement dans sa case
+    // (deux ressorts extensibles au-dessus et au-dessous).
+    let bar_cell = Widget::new().parent(&bar_row).build();
+    let mut bar_v = VBoxLayout::with_parent(&bar_cell);
+    bar_v.set_spacing(0);
+    bar_v.add_spacer(Spacer::vertical_expanding());
+    bar_v.add(wrap_scroll(&bar, wp));
+    bar_v.add_spacer(Spacer::vertical_expanding());
+    bar_l.add(bar_cell);
     bar_l.add(wrap_scroll(&status, wp));
     root.add(bar_row);
 
@@ -669,6 +679,7 @@ fn build_ui(
         actions: actions_l,
         modbox: mod_l,
         bar_row: bar_l,
+        bar_cell: bar_v,
         central,
     };
 
