@@ -161,16 +161,29 @@ fn wrap_scroll(w: &Rc<RefCell<impl qtrs::AsWidget>>, parent: &dyn AsWidget) -> S
     sa
 }
 
-/// Boîte de confirmation modale (Oui/Non) parentée à la fenêtre.
-fn confirm(parent: &dyn AsWidget, text: &str) -> bool {
+/// Boîte de confirmation modale (Oui/Non).
+///
+/// Volontairement SANS parent : passer un parent obligerait à garder emprunté
+/// le `RefCell` de la fenêtre pendant `exec()` (boucle d'événements imbriquée) ;
+/// tout callback touchant la fenêtre entre-temps déclenche alors un double
+/// emprunt (`already borrowed`) qui avorte silencieusement l'action.
+fn confirm(text: &str) -> bool {
     let mb = MessageBox::new()
         .icon(3) // Question
         .text(text)
         .window_title("Ollama Manager")
         .standard_buttons(0x4000 | 0x400) // Yes | No
-        .parent(parent)
         .build();
     mb.exec() == 0x4000 // QMessageBox::Yes
+}
+
+/// Nom du modèle situé à la ligne `row` (-1 = aucune sélection).
+/// Fonction pure, testable sans interface.
+pub fn model_name_at(models: &[Model], row: i32) -> Option<String> {
+    if row < 0 {
+        return None;
+    }
+    models.get(row as usize).map(|m| m.name.clone())
 }
 
 // ------------------------------------------------------------------
@@ -592,21 +605,19 @@ fn build_ui(
             let status = status.clone();
             let models = models.clone();
             let table_ref = table.clone();
-            let window = Rc::clone(window);
             move || {
                 let row = table_ref.borrow().current_row();
-                if row < 0 {
-                    status
-                        .borrow_mut()
-                        .set_text("Sélectionnez d'abord un modèle à supprimer.");
-                    return;
-                }
-                let Some(name) = models.borrow().get(row as usize).map(|m| m.name.clone()) else {
-                    status.borrow_mut().set_text("Ligne invalide.");
+                let Some(name) = model_name_at(&models.borrow(), row) else {
+                    status.borrow_mut().set_text(if row < 0 {
+                        "Sélectionnez d'abord un modèle à supprimer."
+                    } else {
+                        "Ligne invalide."
+                    });
                     return;
                 };
-                let w = window.borrow();
-                if !confirm(&*w, &format!("Supprimer « {name} » ?")) {
+                // Aucun emprunt de `window` n'est conservé ici : le dialogue
+                // modal tourne dans sa propre boucle d'événements.
+                if !confirm(&format!("Supprimer « {name} » ?")) {
                     return;
                 }
                 let url = load_server_url();
@@ -755,19 +766,18 @@ fn main() {
                                 .set_text(&format!("[{name}] {st} — {pct}%"));
                         }
                         WorkerMsg::ActionDone { name, ok, message } => {
-                            let mb = MessageBox::new()
-                                .icon(if ok { 2 } else { 0 })
-                                .text(if ok {
-                                    "Terminé"
-                                } else {
-                                    "Échec de l'opération"
-                                })
-                                .informative_text(&format!("{name} : {message}"))
-                                .window_title("Ollama Manager")
-                                .standard_buttons(0x400)
-                                .build();
-                            let _ = mb.exec();
+                            // PAS de boîte modale ici : ce code tourne dans le
+                            // callback du timer Qt, et un exec() imbriqué
+                            // ré-entrait la boucle d'événements (le dialogue
+                            // pouvait être détruit sous ses propres connexions,
+                            // d'où le spam QObject::disconnect et l'action qui
+                            // semblait ne pas aboutir). Le statut affiche le
+                            // résultat, sans bloquer la pompe.
                             bar.borrow_mut().set_value(0);
+                            let mark = if ok { "✔" } else { "✘" };
+                            status
+                                .borrow_mut()
+                                .set_text(&format!("{mark} {name} : {message}"));
                             // Recharger la liste après une action réussie.
                             let url = load_server_url();
                             if ok && !url.trim().is_empty() {
@@ -803,6 +813,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_name_at_tests() {
+        let mk = |n: &str| Model {
+            name: n.to_string(),
+            size: 0,
+            modified_at: String::new(),
+            params: String::new(),
+            quant: String::new(),
+            caps: String::new(),
+        };
+        let models = vec![mk("llama3.2:3b"), mk("qwen3:8b")];
+        // Sélection valide -> nom exact (c'est ce nom qui part dans DELETE).
+        assert_eq!(model_name_at(&models, 0).as_deref(), Some("llama3.2:3b"));
+        assert_eq!(model_name_at(&models, 1).as_deref(), Some("qwen3:8b"));
+        // Aucune sélection.
+        assert_eq!(model_name_at(&models, -1), None);
+        // Ligne hors bornes (liste rafraîchie entre-temps).
+        assert_eq!(model_name_at(&models, 2), None);
+        // Liste vide.
+        assert_eq!(model_name_at(&[], 0), None);
+    }
 
     #[test]
     fn ini_api_key_simple() {

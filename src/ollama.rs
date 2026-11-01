@@ -450,8 +450,72 @@ mod tests {
 
     // ---- Calcul de progression ---------------------------------------------
 
+    // Les tests qui touchent la cle API globale doivent etre serialises :
+    // ils tournent en parallele par defaut et se corrompent mutuellement.
+    static HTTP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Non-régression : la suppression doit envoyer `DELETE /api/delete`
+    /// avec le nom du modèle dans le corps JSON.
+    #[test]
+    fn suppression_envoie_delete_avec_le_nom() {
+        let _g = HTTP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            // Lit jusqu'à disposer des en-têtes ET du corps annoncé.
+            loop {
+                let n = s.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(pos) = text.find("\r\n\r\n") {
+                    let head = &text[..pos];
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= pos + 4 + len {
+                        break;
+                    }
+                }
+            }
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .unwrap();
+            String::from_utf8_lossy(&buf).to_string()
+        });
+
+        set_api_key(None);
+        delete_model(&format!("http://127.0.0.1:{port}"), "smollm2:135m").unwrap();
+        let req = h.join().unwrap();
+
+        let head = req.split("\r\n\r\n").next().unwrap_or_default();
+        assert!(
+            head.starts_with("DELETE /api/delete"),
+            "methode/URI inattendues:\n{head}"
+        );
+        assert!(
+            req.contains("smollm2:135m"),
+            "nom du modele absent du corps:\n{req}"
+        );
+    }
+
     #[test]
     fn requete_porte_la_cle_api() {
+        let _g = HTTP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::{Read, Write};
         use std::net::TcpListener;
         // Serveur minimal qui capture la requete et repond un JSON valide.
