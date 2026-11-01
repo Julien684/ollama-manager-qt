@@ -161,20 +161,26 @@ fn wrap_scroll(w: &Rc<RefCell<impl qtrs::AsWidget>>, parent: &dyn AsWidget) -> S
     sa
 }
 
-/// Boîte de confirmation modale (Oui/Non).
+/// Boutons Qt utilisés pour les dialogues (valeurs QMessageBox::StandardButton).
+/// ATTENTION : `Ok` vaut 0x400 et `Yes` 0x4000 — les confondre fait qu'un clic
+/// sur « Ok » renvoie une valeur que le code ne reconnaît pas (action annulée
+/// en silence, sans erreur).
+pub const BTN_YES: i32 = 0x0000_4000;
+pub const BTN_CANCEL: i32 = 0x0040_0000;
+
+/// Boîte de confirmation modale (Oui / Annuler).
 ///
-/// Volontairement SANS parent : passer un parent obligerait à garder emprunté
-/// le `RefCell` de la fenêtre pendant `exec()` (boucle d'événements imbriquée) ;
-/// tout callback touchant la fenêtre entre-temps déclenche alors un double
-/// emprunt (`already borrowed`) qui avorte silencieusement l'action.
+/// Sans parent : voir la note sur le double emprunt de `RefCell` ci-dessus.
+/// « Annuler » plutôt que « Ok »/« Non » : deux boutons validants (Oui + Ok)
+/// prêtaient à confusion.
 fn confirm(text: &str) -> bool {
     let mb = MessageBox::new()
         .icon(3) // Question
         .text(text)
         .window_title("Ollama Manager")
-        .standard_buttons(0x4000 | 0x400) // Yes | No
+        .standard_buttons(BTN_YES | BTN_CANCEL)
         .build();
-    mb.exec() == 0x4000 // QMessageBox::Yes
+    mb.exec() == BTN_YES
 }
 
 /// Nom du modèle situé à la ligne `row` (-1 = aucune sélection).
@@ -211,9 +217,9 @@ struct Layouts {
     #[allow(dead_code)]
     modbox: VBoxLayout,
     #[allow(dead_code)]
-    bar_row: HBoxLayout,
+    bar_row: VBoxLayout,
     #[allow(dead_code)]
-    bar_cell: VBoxLayout,
+    log_row: VBoxLayout,
     /// Widget central sans parent : SANS lui, qtrs supprime le C++ du widget
     /// (donc toute la sous-arborescence) à la fin de `build_ui` → segfault dans
     /// `app.exec()`. Doit vivre aussi longtemps que la fenêtre.
@@ -645,25 +651,25 @@ fn build_ui(
     mod_l.add(wrap_scroll(&table, wp));
     root.add(mod_box);
 
-    // ---- Barre de progression + statut --------------------------------------
+    // ---- Barre de progression (pleine largeur, centree en hauteur) ----------
     let bar_row = Widget::new().parent(&central).build();
-    // La zone du bas (barre + logs) prenait trop de hauteur au detriment de la
-    // liste des modeles : on la borne.
-    bar_row.set_max_size(16_777_215, 120);
-    bar_row.set_min_size(0, 92);
-    let mut bar_l = HBoxLayout::with_parent(&bar_row);
-    bar_l.set_spacing(10);
-    // Cellule gauche : la barre est centree verticalement dans sa case
-    // (deux ressorts extensibles au-dessus et au-dessous).
-    let bar_cell = Widget::new().parent(&bar_row).build();
-    let mut bar_v = VBoxLayout::with_parent(&bar_cell);
+    bar_row.set_max_size(16_777_215, 58);
+    bar_row.set_min_size(0, 46);
+    let mut bar_v = VBoxLayout::with_parent(&bar_row);
     bar_v.set_spacing(0);
     bar_v.add_spacer(Spacer::vertical_expanding());
     bar_v.add(wrap_scroll(&bar, wp));
     bar_v.add_spacer(Spacer::vertical_expanding());
-    bar_l.add(bar_cell);
-    bar_l.add(wrap_scroll(&status, wp));
     root.add(bar_row);
+
+    // ---- Logs / statut (pleine largeur, sous la barre) ----------------------
+    let log_row = Widget::new().parent(&central).build();
+    log_row.set_max_size(16_777_215, 130);
+    log_row.set_min_size(0, 80);
+    let mut log_v = VBoxLayout::with_parent(&log_row);
+    log_v.set_spacing(0);
+    log_v.add(wrap_scroll(&status, wp));
+    root.add(log_row);
 
     // Enveloppe défilante.
     let central_scroll =
@@ -678,8 +684,8 @@ fn build_ui(
         dl: dl_g,
         actions: actions_l,
         modbox: mod_l,
-        bar_row: bar_l,
-        bar_cell: bar_v,
+        bar_row: bar_v,
+        log_row: log_v,
         central,
     };
 
@@ -824,6 +830,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boutons_dialogue_distincts() {
+        // Regression : 0x400 n'est PAS "Non" mais "Ok" ; l'ancien code attendait
+        // 0x4000 (Oui) et un clic sur "Ok" annulait la suppression en silence.
+        assert_eq!(BTN_YES, 0x4000);
+        assert_eq!(BTN_CANCEL, 0x0040_0000);
+        assert_ne!(BTN_CANCEL, 0x400);
+        assert_ne!(BTN_YES, BTN_CANCEL);
+        // Les deux boutons doivent figurer dans le masque transmis a Qt.
+        let mask = BTN_YES | BTN_CANCEL;
+        assert_eq!(mask & BTN_YES, BTN_YES);
+        assert_eq!(mask & BTN_CANCEL, BTN_CANCEL);
+    }
 
     #[test]
     fn model_name_at_tests() {
