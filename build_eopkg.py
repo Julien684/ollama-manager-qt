@@ -30,7 +30,7 @@ OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
 VERSION        = "0.1.0"
-RELEASE        = 3
+RELEASE        = 4
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
@@ -47,6 +47,10 @@ FILE_LIST = [
      "target/release/ollama-manager-qt", 0o755),
     ("usr/share/applications/ollama-manager-qt.desktop",
      "ollama-manager-qt.desktop", 0o644),
+    # Copie hors theme : le .desktop pointe ce chemin absolu, que les menus
+    # (KDE/GTK) resolvent toujours, contrairement au seul nom de theme.
+    ("usr/share/pixmaps/ollama-manager-qt.png",
+     "icons/ollama-manager-qt-256.png", 0o644),
     ("usr/share/doc/ollama-manager-qt/README.md",
      "README.md", 0o644),
     ("usr/share/licenses/ollama-manager-qt/LICENSE",
@@ -199,7 +203,14 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
             <Update release="{RELEASE}">
                 <Date>{today}</Date>
                 <Version>{VERSION}</Version>
-                <Comment>{PACKAGE_NAME} {VERSION} : champ de telechargement reellement visible (GridLayout : libelle + champ + bouton), nouvelle icone application (lama blanc avec cle a molette)</Comment>
+                <Comment>{PACKAGE_NAME} {VERSION} : icone resolue par le menu (icone installee dans /usr/share/pixmaps + Icon= absolu, set_icon/set_desktop_file_name cote app), zone barre de progression + logs limitee en hauteur</Comment>
+                <Name>{PACKAGER_NAME}</Name>
+                <Email>{PACKAGER_EMAIL}</Email>
+            </Update>
+            <Update release="3">
+                <Date>2026-11-01</Date>
+                <Version>{VERSION}</Version>
+                <Comment>{PACKAGE_NAME} {VERSION} : champ de telechargement reellement visible (GridLayout : libelle + champ + bouton), icone lama blanc avec cle a molette</Comment>
                 <Name>{PACKAGER_NAME}</Name>
                 <Email>{PACKAGER_EMAIL}</Email>
             </Update>

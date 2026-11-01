@@ -104,6 +104,20 @@ fn read_line_edit(ptr: *mut qtrs::ffi::QLineEdit) -> String {
     unsafe { qtrs::ffi::QLineEdit_text(ptr) }
 }
 
+/// Cherche l'icone de l'application (installee d'abord, puis locale au build).
+fn app_icon_path() -> Option<String> {
+    for p in [
+        "/usr/share/pixmaps/ollama-manager-qt.png",
+        "/usr/share/icons/hicolor/256x256/apps/ollama-manager-qt.png",
+        "icons/ollama-manager-qt-256.png",
+    ] {
+        if std::path::Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
 /// Enveloppe un widget interactif dans un `ScrollArea` (pattern qtrs).
 fn wrap_scroll(w: &Rc<RefCell<impl qtrs::AsWidget>>, parent: &dyn AsWidget) -> ScrollArea {
     let sa = ScrollArea::new().parent(parent).set_widget_resizable(true).build();
@@ -554,6 +568,10 @@ fn build_ui(
 
     // ---- Barre de progression + statut --------------------------------------
     let bar_row = Widget::new().parent(&central).build();
+    // La zone du bas (barre + logs) prenait trop de hauteur au detriment de la
+    // liste des modeles : on la borne.
+    bar_row.set_max_size(16_777_215, 120);
+    bar_row.set_min_size(0, 92);
     let mut bar_l = HBoxLayout::with_parent(&bar_row);
     bar_l.set_spacing(10);
     bar_l.add(wrap_scroll(&bar, wp));
@@ -582,6 +600,14 @@ fn build_ui(
 // ------------------------------------------------------------------
 fn main() {
     let app = Application::new();
+    // Icone de fenetre / barre des taches : on pointe un fichier reel.
+    // (Le nom de theme seul n'etait pas resolu par le menu -> icone vide.)
+    if let Some(p) = app_icon_path() {
+        app.set_icon(&p);
+    }
+    // Indispensable sous Wayland/KDE : associe la fenetre au .desktop pour que
+    // le compositeur affiche son icone dans le sélecteur de taches.
+    app.set_desktop_file_name("ollama-manager-qt");
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
 
     let window = Rc::new(RefCell::new(
