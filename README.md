@@ -34,11 +34,12 @@ cargo build --release
 
 ## Installation (Solus)
 
-Paquet `.eopkg` fourni dans ce dépôt :
+Le paquet `.eopkg` et le binaire sont fournis dans les
+[releases](https://github.com/Julien684/ollama-manager-qt/releases) :
 
 ```bash
 sudo eopkg install -y \
-  https://raw.githubusercontent.com/Julien684/ollama-manager-qt/main/ollama-manager-qt-0.1.0-12-1-x86_64.eopkg
+  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.0-12-1-x86_64.eopkg
 ```
 
 Ou depuis le dépôt binaire personnel : `sudo eopkg install -y ollama-manager-qt`
@@ -115,11 +116,12 @@ cargo build --release
 
 ## Installation (Solus)
 
-The `.eopkg` package is provided in this repository:
+The `.eopkg` package and the binary are provided in the
+[releases](https://github.com/Julien684/ollama-manager-qt/releases):
 
 ```bash
 sudo eopkg install -y \
-  https://raw.githubusercontent.com/Julien684/ollama-manager-qt/main/ollama-manager-qt-0.1.0-12-1-x86_64.eopkg
+  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.0-12-1-x86_64.eopkg
 ```
 
 Or from the personal binary repository: `sudo eopkg install -y ollama-manager-qt`
