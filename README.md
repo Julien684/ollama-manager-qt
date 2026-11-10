@@ -46,6 +46,20 @@ Ou depuis le dépôt binaire personnel : `sudo eopkg install -y ollama-manager-q
 (dépôt `linuxon` — voir `Julien684/eopkg-repo`). Seul prérequis : `qt6-base`
 (fourni par le système Solus).
 
+## Installation (Debian / Ubuntu)
+
+Un paquet `.deb` est également fourni dans les
+[releases](https://github.com/Julien684/ollama-manager-qt/releases) :
+
+```bash
+curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.1.0-12_amd64.deb
+sudo apt install ./ollama-manager-qt_0.1.0-12_amd64.deb
+```
+
+Fonctionne sur Debian 12+ et Ubuntu 24.04+ (Qt 6 et ses dépendances sont
+installés automatiquement par `apt`). Le paquet installe le binaire, le
+raccourci d'application et les icônes.
+
 ## Tests
 
 ```bash
@@ -127,6 +141,20 @@ sudo eopkg install -y \
 Or from the personal binary repository: `sudo eopkg install -y ollama-manager-qt`
 (the `linuxon` repo — see `Julien684/eopkg-repo`). Only prerequisite: `qt6-base`
 (provided by the Solus system).
+
+## Installation (Debian / Ubuntu)
+
+A `.deb` package is also provided in the
+[releases](https://github.com/Julien684/ollama-manager-qt/releases):
+
+```bash
+curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.1.0-12_amd64.deb
+sudo apt install ./ollama-manager-qt_0.1.0-12_amd64.deb
+```
+
+Works on Debian 12+ and Ubuntu 24.04+ (Qt 6 and its dependencies are
+installed automatically by `apt`). The package installs the binary, the
+desktop entry and the icons.
 
 ## Tests
 
