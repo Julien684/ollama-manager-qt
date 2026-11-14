@@ -39,7 +39,7 @@ Le paquet `.eopkg` et le binaire sont fournis dans les
 
 ```bash
 sudo eopkg install -y \
-  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.0-12-1-x86_64.eopkg
+  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.0-13-1-x86_64.eopkg
 ```
 
 Ou depuis le dépôt binaire personnel : `sudo eopkg install -y ollama-manager-qt`
@@ -135,7 +135,7 @@ The `.eopkg` package and the binary are provided in the
 
 ```bash
 sudo eopkg install -y \
-  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.0-12-1-x86_64.eopkg
+  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.0-13-1-x86_64.eopkg
 ```
 
 Or from the personal binary repository: `sudo eopkg install -y ollama-manager-qt`
