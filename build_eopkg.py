@@ -30,12 +30,12 @@ OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
 VERSION        = "0.1.0"
-RELEASE        = 11
+RELEASE        = 13
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
 BUILD_HOST     = "solus-local"
-HOME_PAGE      = "https://depoa.julien68.fr/Linuxon/ollama-manager-qt"
+HOME_PAGE      = "https://github.com/Julien684/ollama-manager-qt"
 PACKAGER_NAME  = "Julien"
 PACKAGER_EMAIL = "julien_solus@use.startmail.com"
 PART_OF        = "network.utilities"
@@ -53,8 +53,11 @@ FILE_LIST = [
      "icons/ollama-manager-qt-256.png", 0o644),
     ("usr/share/doc/ollama-manager-qt/README.md",
      "README.md", 0o644),
+    ("usr/share/doc/ollama-manager-qt/screenshot.png",
+     "screenshot.png", 0o644),
     ("usr/share/licenses/ollama-manager-qt/LICENSE",
      "LICENSE", 0o644),
+    ("usr/share/metainfo/fr.julien68.OllamaModelManager.metainfo.xml", "fr.julien68.OllamaModelManager.metainfo.xml", 0o644),
 ]
 # Icones hicolor : le .desktop pointe sur « ollama-manager-qt », le thème
 # hicolor fournit toutes les tailles.
@@ -203,7 +206,7 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
             <Update release="{RELEASE}">
                 <Date>{date.today().isoformat()}</Date>
                 <Version>{VERSION}</Version>
-                <Comment>{PACKAGE_NAME} {VERSION} : renommage en « Ollama Model Manager » (titre de fenetre et entree de menu)</Comment>
+                <Comment>{PACKAGE_NAME} {VERSION} : capture d'ecran dans le README</Comment>
                 <Name>{PACKAGER_NAME}</Name>
                 <Email>{PACKAGER_EMAIL}</Email>
             </Update>
