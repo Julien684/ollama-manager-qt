@@ -18,14 +18,16 @@
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use qtrs::prelude::*;
-use qtrs::{Application, MessageBox, Timer};
+use qtrs::{Application, MessageBox, TabWidget, Timer};
 
 mod ollama;
-use ollama::{fmt_bytes, fmt_date, delete_model, get_version, list_models,
-             pull_model, Model};
+use ollama::{fmt_bytes, fmt_date, fmt_remaining, delete_model, get_version, list_models,
+             list_running, load_model, processor_label, pull_model, unload_model, Model,
+             RunningModel};
 
 // ------------------------------------------------------------------
 // Messages worker → UI
@@ -33,11 +35,20 @@ use ollama::{fmt_bytes, fmt_date, delete_model, get_version, list_models,
 enum WorkerMsg {
     /// Résultats d'un `GET /api/tags` : (série JSON des modèles, message d'erreur si échec).
     List(Option<String>, String),
+    /// Résultats d'un `GET /api/ps` : (série JSON des modèles chargés, erreur).
+    Running(Option<String>, String),
     /// Progression d'un pull : (nom, pct, statut).
     Progress { name: String, pct: u32, status: String },
     /// Fin d'une action (pull / delete) : (nom, ok, message).
     ActionDone { name: String, ok: bool, message: String },
+    /// Fin d'un chargement / déchargement depuis l'onglet Moniteur.
+    MonitorDone { ok: bool, message: String },
 }
+
+/// Un seul `GET /api/ps` à la fois : sans ce verrou, un serveur injoignable
+/// (timeout 120 s) ferait s'empiler un thread toutes les 5 s.
+static PS_BUSY: AtomicBool = AtomicBool::new(false);
+
 
 // ------------------------------------------------------------------
 // Helpers
@@ -91,12 +102,18 @@ pub fn parse_ini_api_key(content: &str) -> Option<String> {
     parse_ini_key(content, "apiKey")
 }
 
-/// Lit (URL du serveur, clé API) depuis la configuration.
-fn load_config() -> (String, String) {
+/// Parse la clé `keepAlive` (durée de maintien en mémoire) d'un INI Qt.
+pub fn parse_ini_keep_alive(content: &str) -> Option<String> {
+    parse_ini_key(content, "keepAlive")
+}
+
+/// Lit (URL du serveur, clé API, keep_alive) depuis la configuration.
+fn load_config() -> (String, String, String) {
     let content = std::fs::read_to_string(config_path()).unwrap_or_default();
     (
         parse_ini_server_url(&content).unwrap_or_default(),
         parse_ini_api_key(&content).unwrap_or_default(),
+        parse_ini_keep_alive(&content).unwrap_or_default(),
     )
 }
 
@@ -115,8 +132,8 @@ fn ini_value(raw: &str) -> String {
     }
 }
 
-/// Écrit l'URL ET la clé API (une clé vide retire la ligne `apiKey`).
-fn save_config(url: &str, api_key: &str) {
+/// Écrit l'URL, la clé API et le keep_alive (une clé vide retire `apiKey`).
+fn save_config(url: &str, api_key: &str, keep_alive: &str) {
     let path = config_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -125,6 +142,9 @@ fn save_config(url: &str, api_key: &str) {
     out.push_str(&format!("serverUrl={}\n", ini_value(url)));
     if !api_key.trim().is_empty() {
         out.push_str(&format!("apiKey={}\n", ini_value(api_key.trim())));
+    }
+    if !keep_alive.trim().is_empty() {
+        out.push_str(&format!("keepAlive={}\n", ini_value(keep_alive.trim())));
     }
     let _ = std::fs::write(&path, out);
 }
@@ -228,6 +248,14 @@ struct Ui {
     status: Rc<RefCell<Label>>,
     /// Modèles courants (index de ligne = position dans ce Vec).
     models: Rc<RefCell<Vec<Model>>>,
+    /// Onglet Moniteur : modèles chargés (`ollama ps`).
+    run_table: Rc<RefCell<TableWidget>>,
+    /// Onglet Moniteur : modèles disponibles au chargement.
+    avail_table: Rc<RefCell<TableWidget>>,
+    /// Statut propre à l'onglet Moniteur (ne pas polluer celui de Gestion).
+    m_status: Rc<RefCell<Label>>,
+    /// Modèles actuellement chargés (index de ligne = position dans ce Vec).
+    running: Rc<RefCell<Vec<RunningModel>>>,
 }
 
 struct Layouts {
@@ -247,6 +275,21 @@ struct Layouts {
     bar_row: VBoxLayout,
     #[allow(dead_code)]
     log_row: VBoxLayout,
+    /// Layouts des deux pages d'onglets et des boîtes du Moniteur.
+    #[allow(dead_code)]
+    g_page: VBoxLayout,
+    #[allow(dead_code)]
+    m_page: VBoxLayout,
+    #[allow(dead_code)]
+    ka_grid: GridLayout,
+    #[allow(dead_code)]
+    run_box: VBoxLayout,
+    #[allow(dead_code)]
+    run_actions: HBoxLayout,
+    #[allow(dead_code)]
+    avail_box: VBoxLayout,
+    #[allow(dead_code)]
+    avail_actions: HBoxLayout,
     /// Widget central sans parent : SANS lui, qtrs supprime le C++ du widget
     /// (donc toute la sous-arborescence) à la fin de `build_ui` → segfault dans
     /// `app.exec()`. Doit vivre aussi longtemps que la fenêtre.
@@ -258,19 +301,87 @@ struct Layouts {
 // Actions (utilisées par les boutons ET par le timer)
 // ------------------------------------------------------------------
 
-/// Remplit la table avec la liste de modèles reçue.
-fn fill_table(ui: &Ui, models: Vec<Model>) {
-    ui.models.borrow_mut().clone_from(&models);
-    let t = ui.table.borrow();
-    t.set_row_count(models.len() as i32);
-    for (i, m) in models.iter().enumerate() {
-        t.set_item(i as i32, 0, &m.name);
-        t.set_item(i as i32, 1, &fmt_bytes(m.size));
+/// Remplit la table de l'onglet Gestion avec la liste de modèles reçue.
+fn fill_table(table: &TableWidget, models: &Rc<RefCell<Vec<Model>>>, list: Vec<Model>) {
+    models.borrow_mut().clone_from(&list);
+    table.set_row_count(list.len() as i32);
+    for (i, m) in list.iter().enumerate() {
+        table.set_item(i as i32, 0, &m.name);
+        table.set_item(i as i32, 1, &fmt_bytes(m.size));
         let meta = format!("{} {}", m.params, m.quant).trim().to_string();
-        t.set_item(i as i32, 2, &meta);
-        t.set_item(i as i32, 3, &fmt_date(&m.modified_at));
-        t.set_item(i as i32, 4, &m.caps);
+        table.set_item(i as i32, 2, &meta);
+        table.set_item(i as i32, 3, &fmt_date(&m.modified_at));
+        table.set_item(i as i32, 4, &m.caps);
     }
+}
+
+/// Remplit la liste « modèles disponibles » de l'onglet Moniteur.
+fn fill_avail(table: &TableWidget, list: &[Model]) {
+    table.set_row_count(list.len() as i32);
+    for (i, m) in list.iter().enumerate() {
+        table.set_item(i as i32, 0, &m.name);
+        table.set_item(i as i32, 1, &fmt_bytes(m.size));
+        let meta = format!("{} {}", m.params, m.quant).trim().to_string();
+        table.set_item(i as i32, 2, &meta);
+    }
+}
+
+/// Remplit l'état « modèles chargés » — mêmes colonnes que `ollama ps`
+/// (nom, taille, processeur, expiration).
+fn fill_running(table: &TableWidget, list: &[RunningModel], now: i64) {
+    table.set_row_count(list.len() as i32);
+    for (i, m) in list.iter().enumerate() {
+        table.set_item(i as i32, 0, &m.name);
+        table.set_item(i as i32, 1, &fmt_bytes(m.size));
+        table.set_item(i as i32, 2, &processor_label(m.size, m.size_vram));
+        table.set_item(i as i32, 3, &fmt_remaining(&m.expires_at, now));
+    }
+}
+
+/// Nom du modèle chargé à la ligne `row` (-1 = aucune sélection).
+pub fn running_name_at(models: &[RunningModel], row: i32) -> Option<String> {
+    if row < 0 {
+        return None;
+    }
+    models.get(row as usize).map(|m| m.name.clone())
+}
+
+/// Secondes Unix courantes (pour « expire dans … »).
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Lance une lecture de `GET /api/ps` dans un thread.
+fn refresh_running(tx: &mpsc::Sender<WorkerMsg>, url: &str) {
+    let tx = tx.clone();
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        let (payload, err) = match list_running(&url) {
+            Ok(v) => (
+                Some(serde_json::to_string(&v).unwrap_or_default()),
+                String::new(),
+            ),
+            Err(e) => (None, e.to_string()),
+        };
+        let _ = tx.send(WorkerMsg::Running(payload, err));
+    });
+}
+
+/// Lance une lecture de `GET /api/tags` dans un thread (rafraîchissement).
+fn spawn_list(tx: mpsc::Sender<WorkerMsg>, url: String) {
+    std::thread::spawn(move || {
+        let (payload, err) = match list_models(&url) {
+            Ok(m) => (
+                Some(serde_json::to_string(&m).unwrap_or_default()),
+                String::new(),
+            ),
+            Err(e) => (None, e.to_string()),
+        };
+        let _ = tx.send(WorkerMsg::List(payload, err));
+    });
 }
 
 /// Lance un pull dans un thread, avec remontée de progression via `tx`.
@@ -338,10 +449,18 @@ fn build_ui(
     ));
     let status = Rc::new(RefCell::new(Label::new("En attente…").build()));
     let models = Rc::new(RefCell::new(Vec::new()));
+    // Onglet Moniteur : état courant (`ollama ps`) + modèles disponibles.
+    let run_table = Rc::new(RefCell::new(TableWidget::new(0, 4).build()));
+    let avail_table = Rc::new(RefCell::new(TableWidget::new(0, 3).build()));
+    let m_status = Rc::new(RefCell::new(Label::new("Aucun modèle chargé.").build()));
+    let running = Rc::new(RefCell::new(Vec::new()));
 
     table.borrow_mut().set_has_parent();
     bar.borrow_mut().set_has_parent();
     status.borrow_mut().set_has_parent();
+    run_table.borrow_mut().set_has_parent();
+    avail_table.borrow_mut().set_has_parent();
+    m_status.borrow_mut().set_has_parent();
     table.borrow_mut().set_horizontal_header_labels(&[
         "Modèle", "Taille", "Paramètres", "Modifié", "Capacités",
     ]);
@@ -350,6 +469,20 @@ fn build_ui(
     table.borrow_mut().set_column_width(2, 120);
     table.borrow_mut().set_column_width(3, 90);
     table.borrow_mut().set_column_width(4, 260);
+    // Mêmes colonnes que `ollama ps` (NAME / SIZE / PROCESSOR / UNTIL).
+    run_table.borrow_mut().set_horizontal_header_labels(&[
+        "Modèle", "Taille", "Processeur", "Expire dans",
+    ]);
+    run_table.borrow_mut().set_column_width(0, 460);
+    run_table.borrow_mut().set_column_width(1, 100);
+    run_table.borrow_mut().set_column_width(2, 160);
+    run_table.borrow_mut().set_column_width(3, 130);
+    avail_table.borrow_mut().set_horizontal_header_labels(&[
+        "Modèle", "Taille", "Paramètres",
+    ]);
+    avail_table.borrow_mut().set_column_width(0, 460);
+    avail_table.borrow_mut().set_column_width(1, 100);
+    avail_table.borrow_mut().set_column_width(2, 160);
 
     let w = window.borrow();
     let wp: &dyn AsWidget = &*w;
@@ -358,6 +491,10 @@ fn build_ui(
         bar: bar.clone(),
         status: status.clone(),
         models: models.clone(),
+        run_table: run_table.clone(),
+        avail_table: avail_table.clone(),
+        m_status: m_status.clone(),
+        running: running.clone(),
     };
 
     // ---- Menu ---------------------------------------------------------------
@@ -371,19 +508,43 @@ fn build_ui(
         .build();
     w.set_menu_bar(&menubar);
 
-    // ---- Widget central + layout racine ------------------------------------
-    let central = Widget::new().build();
+    // ---- Widget central + onglets ------------------------------------------
+    let mut central = Widget::new().build();
+    // Sans ce drapeau, le wrapper Rust detruit le C++ a la fin de `build_ui`
+    // alors que QMainWindow garde le pointeur -> segfault au premier paint.
+    central.set_has_parent();
     let mut root = VBoxLayout::with_parent(&central);
     root.set_contents_margins(12, 12, 12, 12);
     root.set_spacing(10);
+
+    // Onglets : « Gestion » (interface historique) et « Moniteur » (nouveau).
+    let mut tabs = TabWidget::new()
+        .on_current_changed({
+            let tx = tx.clone();
+            move |idx| {
+                // Afficher l'onglet Moniteur rafraichit l'etat (`ollama ps`).
+                if idx == 1 {
+                    let url = load_server_url();
+                    if !url.trim().is_empty() {
+                        refresh_running(&tx, &url);
+                    }
+                }
+            }
+        })
+        .build();
+
+    // Page « Gestion » : tout l'ecran precedent, inchange.
+    let g_page = Widget::new().build();
+    let mut g_l = VBoxLayout::with_parent(&g_page);
+    g_l.set_spacing(10);
 
     // ---- Clé API facultative (créée tôt pour être lue par « Tester ») ------
     let api_title = Label::new(
         "Clé API (facultative — laisser vide si le serveur n'en exige pas)",
     )
-    .parent(&central)
+    .parent(&g_page)
     .build();
-    let api_row = Widget::new().parent(&central).build();
+    let api_row = Widget::new().parent(&g_page).build();
     let mut api_l = HBoxLayout::with_parent(&api_row);
     api_l.set_spacing(8);
     let saved_key = load_config().1;
@@ -396,10 +557,10 @@ fn build_ui(
     // Titre du champ : sans lui l'utilisateur ne sait pas quoi y saisir.
     let srv_title =
         Label::new("Serveur Ollama (port par défaut : 11434)")
-            .parent(&central)
+            .parent(&g_page)
             .build();
-    root.add(srv_title);
-    let srv_row = Widget::new().parent(&central).build();
+    g_l.add(srv_title);
+    let srv_row = Widget::new().parent(&g_page).build();
     let mut srv_l = HBoxLayout::with_parent(&srv_row);
     srv_l.set_spacing(8);
 
@@ -446,7 +607,7 @@ fn build_ui(
                     return;
                 }
                 let key = read_line_edit(api_p);
-                save_config(&url, &key);
+                save_config(&url, &key, &load_config().2);
                 ollama::set_api_key(Some(key.clone()));
                 let msg = if key.trim().is_empty() {
                     format!("Adresse enregistrée : {url} (sans clé API)")
@@ -461,13 +622,13 @@ fn build_ui(
         .build();
     srv_l.add(save_btn);
 
-    root.add(srv_row);
-    root.add(api_title);
-    root.add(api_row);
+    g_l.add(srv_row);
+    g_l.add(api_title);
+    g_l.add(api_row);
 
     // ---- Télécharger un modèle ----------------------------------------------
     let dl_box =
-        GroupBox::new("Télécharger un modèle").parent(&central).build();
+        GroupBox::new("Télécharger un modèle").parent(&g_page).build();
     // GridLayout pose directement sur le GroupBox : les enfants sont ajoutes au
     // grid lui-meme. Un `Widget` intermediaire (avec son propre HBoxLayout)
     // ajoute a la VBox du GroupBox ne s'affichait pas du tout (section vide).
@@ -507,11 +668,11 @@ fn build_ui(
         .parent(&dl_box)
         .build();
     dl_g.add(download_btn, 1, 1, 1, 1);
-    root.add(dl_box);
+    g_l.add(dl_box);
 
     // ---- Modèles locaux ------------------------------------------------------
     let mod_box =
-        GroupBox::new("Modèles locaux").parent(&central).build();
+        GroupBox::new("Modèles locaux").parent(&g_page).build();
     let mut mod_l = VBoxLayout::with_parent(&mod_box);
     mod_l.set_spacing(8);
 
@@ -663,10 +824,10 @@ fn build_ui(
 
     mod_l.add(actions_row);
     mod_l.add(wrap_scroll(&table, wp));
-    root.add(mod_box);
+    g_l.add(mod_box);
 
     // ---- Barre de progression (pleine largeur, centree en hauteur) ----------
-    let bar_row = Widget::new().parent(&central).build();
+    let bar_row = Widget::new().parent(&g_page).build();
     bar_row.set_max_size(16_777_215, 58);
     bar_row.set_min_size(0, 46);
     let mut bar_v = VBoxLayout::with_parent(&bar_row);
@@ -674,22 +835,188 @@ fn build_ui(
     bar_v.add_spacer(Spacer::vertical_expanding());
     bar_v.add(wrap_scroll(&bar, wp));
     bar_v.add_spacer(Spacer::vertical_expanding());
-    root.add(bar_row);
+    g_l.add(bar_row);
 
     // ---- Logs / statut (pleine largeur, sous la barre) ----------------------
-    let log_row = Widget::new().parent(&central).build();
+    let log_row = Widget::new().parent(&g_page).build();
     log_row.set_max_size(16_777_215, 130);
     log_row.set_min_size(0, 80);
     let mut log_v = VBoxLayout::with_parent(&log_row);
     log_v.set_spacing(0);
     log_v.add(wrap_scroll(&status, wp));
-    root.add(log_row);
+    g_l.add(log_row);
 
-    // Enveloppe défilante.
-    let central_scroll =
-        ScrollArea::new().parent(wp).set_widget_resizable(true).build();
-    central_scroll.set_widget(&central);
-    w.set_central_widget(&central_scroll);
+    // ================= Page « Moniteur » ====================================
+    let m_page = Widget::new().build();
+    let mut m_l = VBoxLayout::with_parent(&m_page);
+    m_l.set_spacing(10);
+
+    // ---- keep_alive ---------------------------------------------------------
+    let ka_box = GroupBox::new("Maintien en mémoire (keep_alive)")
+        .parent(&m_page)
+        .build();
+    let mut ka_g = GridLayout::with_parent(&ka_box);
+    let ka_title = Label::new(
+        "Durée appliquée au chargement — ex. 5m, 30m, 2h ; -1 = ne jamais décharger",
+    )
+    .parent(&ka_box)
+    .build();
+    ka_g.add(ka_title, 0, 0, 1, 2);
+    let saved_ka = load_config().2;
+    let ka_default = if saved_ka.trim().is_empty() {
+        "5m".to_string()
+    } else {
+        saved_ka
+    };
+    let ka_edit = LineEdit::new(&ka_default).parent(&ka_box).build();
+    let ka_ptr = ka_edit.widget_ptr() as *mut qtrs::ffi::QLineEdit;
+    ka_g.add(ka_edit, 1, 0, 1, 1);
+    let ka_hint = Label::new("Appliqué au prochain chargement")
+        .parent(&ka_box)
+        .build();
+    ka_g.add(ka_hint, 1, 1, 1, 1);
+    m_l.add(ka_box);
+
+    // ---- Modèles chargés — état actuel (`ollama ps`) ------------------------
+    let run_box = GroupBox::new("Modèles chargés — état actuel (ollama ps)")
+        .parent(&m_page)
+        .build();
+    let mut run_l = VBoxLayout::with_parent(&run_box);
+    run_l.set_spacing(8);
+    let run_actions_row = Widget::new().parent(&run_box).build();
+    let mut run_a = HBoxLayout::with_parent(&run_actions_row);
+    run_a.set_spacing(8);
+
+    let run_refresh_btn = PushButton::new("Actualiser")
+        .on_clicked({
+            let tx = tx.clone();
+            let mstatus = Rc::downgrade(&m_status);
+            move || {
+                let url = load_server_url();
+                if url.trim().is_empty() {
+                    set_status(&mstatus, "Enregistrez d'abord l'adresse du serveur.");
+                    return;
+                }
+                set_status(&mstatus, "Lecture de l'état…");
+                refresh_running(&tx, &url);
+            }
+        })
+        .parent(&run_actions_row)
+        .build();
+    run_a.add(run_refresh_btn);
+
+    let unload_btn = PushButton::new("Décharger")
+        .on_clicked({
+            let tx = tx.clone();
+            let mstatus = Rc::downgrade(&m_status);
+            let running = running.clone();
+            let run_ref = Rc::downgrade(&run_table);
+            move || {
+                let row = table_row(&run_ref);
+                let Some(name) = running_name_at(&running.borrow(), row) else {
+                    set_status(&mstatus, if row < 0 {
+                        "Sélectionnez un modèle chargé."
+                    } else {
+                        "Ligne invalide."
+                    });
+                    return;
+                };
+                let url = load_server_url();
+                if url.trim().is_empty() {
+                    set_status(&mstatus, "Enregistrez d'abord l'adresse du serveur.");
+                    return;
+                }
+                set_status(&mstatus, &format!("Déchargement de {name}…"));
+                let tw = tx.clone();
+                std::thread::spawn(move || {
+                    let (ok, message) = match unload_model(&url, &name) {
+                        Ok(()) => (true, format!("{name} déchargé")),
+                        Err(e) => (false, e.to_string()),
+                    };
+                    let _ = tw.send(WorkerMsg::MonitorDone { ok, message });
+                });
+            }
+        })
+        .parent(&run_actions_row)
+        .build();
+    run_a.add(unload_btn);
+
+    run_l.add(run_actions_row);
+    run_l.add(wrap_scroll(&run_table, wp));
+    m_l.add(run_box);
+
+    // ---- Modèles disponibles — à charger ------------------------------------
+    let avail_box = GroupBox::new("Modèles disponibles — à charger")
+        .parent(&m_page)
+        .build();
+    let mut avail_l = VBoxLayout::with_parent(&avail_box);
+    avail_l.set_spacing(8);
+    let avail_actions_row = Widget::new().parent(&avail_box).build();
+    let mut avail_a = HBoxLayout::with_parent(&avail_actions_row);
+    avail_a.set_spacing(8);
+
+    let load_btn = PushButton::new("Charger")
+        .on_clicked({
+            let tx = tx.clone();
+            let mstatus = Rc::downgrade(&m_status);
+            let models = models.clone();
+            let avail_ref = Rc::downgrade(&avail_table);
+            let api_p = api_ptr;
+            move || {
+                let row = table_row(&avail_ref);
+                let Some(name) = model_name_at(&models.borrow(), row) else {
+                    set_status(&mstatus, if row < 0 {
+                        "Sélectionnez un modèle à charger."
+                    } else {
+                        "Ligne invalide."
+                    });
+                    return;
+                };
+                let url = load_server_url();
+                if url.trim().is_empty() {
+                    set_status(&mstatus, "Enregistrez d'abord l'adresse du serveur.");
+                    return;
+                }
+                let ka = read_line_edit(ka_ptr);
+                let ka_txt = if ka.trim().is_empty() {
+                    "5m".to_string()
+                } else {
+                    ka.trim().to_string()
+                };
+                // Mémorise la durée choisie pour les prochaines ouvertures.
+                save_config(&url, &read_line_edit(api_p), &ka_txt);
+                set_status(
+                    &mstatus,
+                    &format!("Chargement de {name} (keep_alive {ka_txt})…"),
+                );
+                let tw = tx.clone();
+                std::thread::spawn(move || {
+                    let (ok, message) = match load_model(&url, &name, &ka_txt) {
+                        Ok(()) => (true, format!("{name} chargé (keep_alive {ka_txt})")),
+                        Err(e) => (false, e.to_string()),
+                    };
+                    let _ = tw.send(WorkerMsg::MonitorDone { ok, message });
+                });
+            }
+        })
+        .parent(&avail_actions_row)
+        .build();
+    avail_a.add(load_btn);
+
+    avail_l.add(avail_actions_row);
+    avail_l.add(wrap_scroll(&avail_table, wp));
+    m_l.add(avail_box);
+
+    // Statut propre à l'onglet Moniteur (résultat des actions).
+    let m_status_sa = wrap_scroll(&m_status, wp);
+    unsafe { qtrs::ffi::QWidget_setFixedHeight(m_status_sa.widget_ptr(), 34) };
+    m_l.add(m_status_sa);
+
+    // ---- Assemblage des onglets --------------------------------------------
+    tabs.add_tab(Box::new(g_page), "Gestion");
+    tabs.add_tab(Box::new(m_page), "Moniteur");
+    root.add(tabs);
+    w.set_central_widget(&central);
 
     let layouts = Layouts {
         root,
@@ -700,6 +1027,13 @@ fn build_ui(
         modbox: mod_l,
         bar_row: bar_v,
         log_row: log_v,
+        g_page: g_l,
+        m_page: m_l,
+        ka_grid: ka_g,
+        run_box: run_l,
+        run_actions: run_a,
+        avail_box: avail_l,
+        avail_actions: avail_a,
         central,
     };
 
@@ -724,7 +1058,7 @@ fn main() {
     let window = Rc::new(RefCell::new(
         MainWindow::new()
             .window_title("Ollama Model Manager")
-            .size(1020, 640)
+            .size(1060, 720)
             .build(),
     ));
 
@@ -746,6 +1080,7 @@ fn main() {
         if !url.trim().is_empty() {
             let st = Rc::downgrade(&ui.status);
             refresh_list(&tx, &url, &st);
+            refresh_running(&tx, &url);
         } else {
             ui.status
                 .borrow_mut()
@@ -766,6 +1101,11 @@ fn main() {
             let bar = Rc::downgrade(&ui.bar);
             let status = Rc::downgrade(&ui.status);
             let models = Rc::clone(&ui.models); // Vec, pas un widget
+            // Onglet Moniteur.
+            let run_table = Rc::downgrade(&ui.run_table);
+            let avail_table = Rc::downgrade(&ui.avail_table);
+            let m_status = Rc::downgrade(&ui.m_status);
+            let running = Rc::clone(&ui.running);
             move || {
                 while let Ok(msg) = rx.try_recv() {
                     match msg {
@@ -773,18 +1113,15 @@ fn main() {
                             let parsed: Vec<Model> =
                                 serde_json::from_str(&payload).unwrap_or_default();
                             let count = parsed.len();
-                            let (Some(t), Some(b), Some(st)) =
-                                (table.upgrade(), bar.upgrade(), status.upgrade())
+                            let (Some(t), Some(_st)) = (table.upgrade(), status.upgrade())
                             else {
                                 continue;
                             };
-                            let ui_l = Ui {
-                                table: t,
-                                bar: b,
-                                status: st,
-                                models: models.clone(),
-                            };
-                            fill_table(&ui_l, parsed);
+                            // La liste alimente aussi l'onglet Moniteur.
+                            if let Some(at) = avail_table.upgrade() {
+                                fill_avail(&at.borrow(), &parsed);
+                            }
+                            fill_table(&t.borrow(), &models, parsed);
                             set_status(
                                 &status,
                                 &format!("{} modèle(s) chargé(s).", count),
@@ -792,6 +1129,34 @@ fn main() {
                         }
                         WorkerMsg::List(None, err) => {
                             set_status(&status, &format!("Erreur : {err}"));
+                        }
+                        WorkerMsg::Running(Some(payload), _) => {
+                            let parsed: Vec<RunningModel> =
+                                serde_json::from_str(&payload).unwrap_or_default();
+                            let count = parsed.len();
+                            if let Some(rt) = run_table.upgrade() {
+                                fill_running(&rt.borrow(), &parsed, now_epoch());
+                            }
+                            running.borrow_mut().clone_from(&parsed);
+                            set_status(
+                                &m_status,
+                                &if count == 0 {
+                                    "Aucun modèle chargé.".to_string()
+                                } else {
+                                    format!("{count} modèle(s) chargé(s).")
+                                },
+                            );
+                        }
+                        WorkerMsg::Running(None, err) => {
+                            set_status(&m_status, &format!("Erreur : {err}"));
+                        }
+                        WorkerMsg::MonitorDone { ok, message } => {
+                            let mark = if ok { "✔" } else { "✘" };
+                            set_status(&m_status, &format!("{mark} {message}"));
+                            let url = load_server_url();
+                            if !url.trim().is_empty() {
+                                refresh_running(&tx2, &url);
+                            }
                         }
                         WorkerMsg::Progress { name, pct, status: st } => {
                             if let Some(b) = bar.upgrade() {
@@ -813,25 +1178,43 @@ fn main() {
                             // Recharger la liste après une action réussie.
                             let url = load_server_url();
                             if ok && !url.trim().is_empty() {
-                                let tx3 = tx2.clone();
-                                let url3 = url.clone();
-                                std::thread::spawn(move || {
-                                    let (payload, err) = match list_models(&url3) {
-                                        Ok(m) => (
-                                            Some(
-                                                serde_json::to_string(&m)
-                                                    .unwrap_or_default(),
-                                            ),
-                                            String::new(),
-                                        ),
-                                        Err(e) => (None, e.to_string()),
-                                    };
-                                    let _ = tx3.send(WorkerMsg::List(payload, err));
-                                });
+                                spawn_list(tx2.clone(), url.clone());
+                                refresh_running(&tx2, &url);
                             }
                         }
                     }
                 }
+            }
+        })
+        .build();
+
+    // ---- Timer de surveillance : rafraîchit `ollama ps` toutes les 5 s ------
+    // Déclaré à portée de `main` (comme la pompe) pour vivre jusqu'à la fin
+    // de `app.exec()`.
+    let _ps_timer = Timer::new(5000)
+        .on_timeout({
+            let tx = tx.clone();
+            move || {
+                let url = load_server_url();
+                if url.trim().is_empty() {
+                    return;
+                }
+                // Un seul appel en vol : un serveur injoignable bloque 120 s.
+                if PS_BUSY.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let (payload, err) = match list_running(&url) {
+                        Ok(v) => (
+                            Some(serde_json::to_string(&v).unwrap_or_default()),
+                            String::new(),
+                        ),
+                        Err(e) => (None, e.to_string()),
+                    };
+                    let _ = tx.send(WorkerMsg::Running(payload, err));
+                    PS_BUSY.store(false, Ordering::SeqCst);
+                });
             }
         })
         .build();
@@ -899,6 +1282,39 @@ mod tests {
         assert_eq!(model_name_at(&models, 2), None);
         // Liste vide.
         assert_eq!(model_name_at(&[], 0), None);
+    }
+
+    #[test]
+    fn running_name_at_tests() {
+        let mk = |n: &str| RunningModel {
+            name: n.to_string(),
+            size: 1,
+            size_vram: 1,
+            expires_at: String::new(),
+        };
+        let list = vec![mk("llama3.2:latest")];
+        // Sélection valide -> nom exact (c'est lui qui part dans /api/generate).
+        assert_eq!(
+            running_name_at(&list, 0).as_deref(),
+            Some("llama3.2:latest")
+        );
+        // Aucune sélection / hors bornes / liste vide.
+        assert_eq!(running_name_at(&list, -1), None);
+        assert_eq!(running_name_at(&list, 1), None);
+        assert_eq!(running_name_at(&[], 0), None);
+    }
+
+    #[test]
+    fn ini_keep_alive_lu() {
+        assert_eq!(
+            parse_ini_keep_alive("[General]\nserverUrl=http://x:11434\nkeepAlive=30m\n"),
+            Some("30m".to_string())
+        );
+        // Absent => None (l'appelant retombe sur 5m).
+        assert_eq!(
+            parse_ini_keep_alive("[General]\nserverUrl=http://x:11434\n"),
+            None
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "ollama-manager-qt"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.85.0"
 description = "Gestionnaire graphique (Qt6) d'Ollama : télécharger, mettre à jour, supprimer des modèles"

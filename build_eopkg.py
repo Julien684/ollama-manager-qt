@@ -29,8 +29,8 @@ SRC_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
 OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
-VERSION        = "0.1.0"
-RELEASE        = 13
+VERSION        = "0.1.1"
+RELEASE        = 14
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"

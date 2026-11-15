@@ -26,16 +26,17 @@ SRC_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
 OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME = "ollama-manager-qt"
-VERSION = "0.1.0"
-DEB_REVISION = 12
+VERSION = "0.1.1"
+DEB_REVISION = 13
 ARCH = "amd64"
 MAINTAINER = "Julien <julien_solus@use.startmail.com>"
 HOMEPAGE = "https://github.com/Julien684/ollama-manager-qt"
 DESCRIPTION = (
     "Ollama Model Manager - graphical Qt6 manager for Ollama\n"
     " Single-binary Rust/Qt6 application to download, update and remove\n"
-    " Ollama models, with a live progress bar, a local-models table and a\n"
-    " configurable, persisted server address."
+    " Ollama models, with a live progress bar, a local-models table, a\n"
+    " monitor tab to load/unload models and a configurable, persisted\n"
+    " server address."
 )
 
 # Alternatives : Debian trixie (et Ubuntu recent) a renomme les paquets Qt6

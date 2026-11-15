@@ -59,6 +59,29 @@ struct TagsResp {
     models: Vec<ModelInfo>,
 }
 
+/// Modèle actuellement chargé en mémoire (`GET /api/ps`).
+///
+/// Reproduit les colonnes de `ollama ps` : nom, taille, processeur
+/// (déduit de `size_vram`), date d'expiration du maintien en mémoire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningModel {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub size_vram: u64,
+    /// ISO 8601 (ex. 2026-11-15T10:12:56.187695428Z).
+    #[serde(default)]
+    pub expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PsResp {
+    #[serde(default)]
+    models: Vec<RunningModel>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PullEvent {
     #[serde(default)]
@@ -215,6 +238,51 @@ pub fn list_models(base: &str) -> Result<Vec<Model>> {
         .collect())
 }
 
+/// `GET /api/ps` — modèles actuellement chargés en mémoire.
+pub fn list_running(base: &str) -> Result<Vec<RunningModel>> {
+    let r = with_auth(agent(base).get(&url(base, "/api/ps")))
+        .call()
+        .map_err(|e| map_ureq_err(base, e))?;
+    let p: PsResp = r
+        .into_json()
+        .map_err(|e| OllamaError::Protocol(e.to_string()))?;
+    Ok(p.models)
+}
+
+/// `POST /api/generate` sans prompt : charge le modèle et le garde en mémoire.
+///
+/// `keep_alive` accepte une durée (`"5m"`, `"2h"`) ou un nombre de secondes
+/// (`-1` = jamais décharger) ; voir [`keep_alive_json`].
+pub fn load_model(base: &str, name: &str, keep_alive: &str) -> Result<()> {
+    let body = serde_json::json!({
+        "model": name,
+        "keep_alive": keep_alive_json(keep_alive),
+        "stream": false,
+    });
+    post_generate(base, &body)
+}
+
+/// `POST /api/generate` avec `keep_alive: 0` : décharge le modèle tout de suite.
+pub fn unload_model(base: &str, name: &str) -> Result<()> {
+    let body = serde_json::json!({
+        "model": name,
+        "keep_alive": 0,
+        "stream": false,
+    });
+    post_generate(base, &body)
+}
+
+fn post_generate(base: &str, body: &serde_json::Value) -> Result<()> {
+    with_auth(
+        agent(base)
+            .post(&url(base, "/api/generate"))
+            .set("Content-Type", "application/json"),
+    )
+    .send_string(&body.to_string())
+    .map_err(|e| map_ureq_err(base, e))?;
+    Ok(())
+}
+
 /// `DELETE /api/delete` — supprime un modèle.
 ///
 /// Note : Ollama >= 0.40 veut une requête DELETE avec body JSON
@@ -333,6 +401,113 @@ pub fn fmt_date(iso: &str) -> String {
         );
     }
     iso.to_string()
+}
+
+/// Valeur JSON de `keep_alive` à partir de la saisie utilisateur.
+///
+/// Ollama attend soit une durée Go (`"5m"`, `"2h"`), soit un nombre de
+/// secondes (`-1` = jamais décharger, `0` = décharger). Un entier est donc
+/// envoyé comme nombre, le reste comme chaîne ; une saisie vide retombe sur
+/// la valeur par défaut d'Ollama (5 min).
+pub fn keep_alive_json(raw: &str) -> serde_json::Value {
+    let t = raw.trim();
+    if t.is_empty() {
+        return serde_json::json!("5m");
+    }
+    if let Ok(n) = t.parse::<i64>() {
+        return serde_json::json!(n);
+    }
+    serde_json::json!(t)
+}
+
+/// Colonne « PROCESSOR » de `ollama ps` : part CPU/GPU déduite de `size_vram`.
+pub fn processor_label(size: u64, size_vram: u64) -> String {
+    if size == 0 {
+        return "—".to_string();
+    }
+    if size_vram == 0 {
+        return "100% CPU".to_string();
+    }
+    if size_vram >= size {
+        return "100% GPU".to_string();
+    }
+    let gpu = size_vram.saturating_mul(100) / size;
+    format!("{}%/{}% CPU/GPU", 100 - gpu, gpu)
+}
+
+/// Jours écoulés depuis l'époque Unix pour une date civile (algorithme de
+/// Howard Hinnant, sans dépendance externe).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Parse un horodatage ISO 8601 (`YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM]`)
+/// en secondes Unix. `None` si le format n'est pas reconnu.
+pub fn parse_iso_epoch(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (date, rest) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let y: i64 = d.next()?.parse().ok()?;
+    let mo: i64 = d.next()?.parse().ok()?;
+    let da: i64 = d.next()?.parse().ok()?;
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) {
+        return None;
+    }
+
+    // Fuseau : « Z » (UTC), « ±HH:MM », ou absent (UTC par défaut).
+    let (time, offset) = if let Some(t) = rest.strip_suffix('Z') {
+        (t, 0)
+    } else if let Some(pos) = rest.rfind(|c| c == '+' || c == '-') {
+        let (t, off) = rest.split_at(pos);
+        let sign = if off.starts_with('-') { -1 } else { 1 };
+        let mut p = off[1..].split(':');
+        let oh: i64 = p.next()?.parse().ok()?;
+        let om: i64 = p.next().unwrap_or("0").parse().ok()?;
+        (t, sign * (oh * 3600 + om * 60))
+    } else {
+        (rest, 0)
+    };
+
+    let time = time.split('.').next()?;
+    let mut hms = time.split(':');
+    let h: i64 = hms.next()?.parse().ok()?;
+    let mi: i64 = hms.next()?.parse().ok()?;
+    let se: i64 = hms.next().unwrap_or("0").parse().ok()?;
+    if h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+    Some(days_from_civil(y, mo, da) * 86_400 + h * 3600 + mi * 60 + se - offset)
+}
+
+/// Temps restant avant expiration, façon `ollama ps` (« 4 min », « 1 h 12 »).
+/// Renvoie la chaîne d'origine si l'horodatage n'est pas reconnu.
+pub fn fmt_remaining(expires_at: &str, now: i64) -> String {
+    let Some(exp) = parse_iso_epoch(expires_at) else {
+        return expires_at.to_string();
+    };
+    let left = exp - now;
+    if left <= 0 {
+        return "expiré".to_string();
+    }
+    if left < 60 {
+        return format!("{left} s");
+    }
+    if left < 3600 {
+        return format!("{} min", left / 60);
+    }
+    let h = left / 3600;
+    let m = (left % 3600) / 60;
+    if m == 0 {
+        format!("{h} h")
+    } else {
+        format!("{h} h {m:02}")
+    }
 }
 
 /// Renvoie `true` si au moins un caractère de `s` est non-ASCII
@@ -567,5 +742,73 @@ mod tests {
         assert_eq!(pct, 99);
         // total == 0 → non divisé (gardé 0 dans la logique réelle).
         assert!(total > 0);
+    }
+
+    // ---- Moniteur : helpers purs (ollama ps / keep_alive) ------------------
+
+    #[test]
+    fn keep_alive_json_tests() {
+        assert_eq!(keep_alive_json("5m"), serde_json::json!("5m"));
+        assert_eq!(keep_alive_json(" 30m "), serde_json::json!("30m"));
+        assert_eq!(keep_alive_json("2h"), serde_json::json!("2h"));
+        // Un entier part en nombre : `-1` n'est pas une durée Go valide.
+        assert_eq!(keep_alive_json("0"), serde_json::json!(0));
+        assert_eq!(keep_alive_json("-1"), serde_json::json!(-1));
+        assert_eq!(keep_alive_json("600"), serde_json::json!(600));
+        // Saisie vide => valeur par défaut d'Ollama.
+        assert_eq!(keep_alive_json("   "), serde_json::json!("5m"));
+    }
+
+    #[test]
+    fn processor_label_tests() {
+        assert_eq!(processor_label(100, 100), "100% GPU");
+        assert_eq!(processor_label(100, 150), "100% GPU");
+        assert_eq!(processor_label(100, 0), "100% CPU");
+        assert_eq!(processor_label(100, 48), "52%/48% CPU/GPU");
+        assert_eq!(processor_label(0, 0), "—");
+    }
+
+    #[test]
+    fn parse_iso_epoch_tests() {
+        assert_eq!(parse_iso_epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso_epoch("1970-01-02T00:00:00Z"), Some(86_400));
+        // Les fractions de seconde sont ignorées.
+        assert_eq!(
+            parse_iso_epoch("2026-11-15T10:12:56.187695428Z"),
+            parse_iso_epoch("2026-11-15T10:12:56Z")
+        );
+        // Décalage horaire : 11:12:56+01:00 == 10:12:56Z.
+        let utc = parse_iso_epoch("2026-11-15T10:12:56Z").unwrap();
+        assert_eq!(parse_iso_epoch("2026-11-15T11:12:56+01:00"), Some(utc));
+        // Formats non reconnus.
+        assert_eq!(parse_iso_epoch("hier"), None);
+        assert_eq!(parse_iso_epoch("2026-13-01T00:00:00Z"), None);
+        assert_eq!(parse_iso_epoch(""), None);
+    }
+
+    #[test]
+    fn fmt_remaining_tests() {
+        let iso = "2026-11-15T10:12:56Z";
+        let exp = parse_iso_epoch(iso).unwrap();
+        assert_eq!(fmt_remaining(iso, exp - 30), "30 s");
+        assert_eq!(fmt_remaining(iso, exp - 125), "2 min");
+        assert_eq!(fmt_remaining(iso, exp - 3600), "1 h");
+        assert_eq!(fmt_remaining(iso, exp - 4320), "1 h 12");
+        assert_eq!(fmt_remaining(iso, exp), "expiré");
+        // Horodatage illisible => renvoyé tel quel.
+        assert_eq!(fmt_remaining("hier", 0), "hier");
+    }
+
+    #[test]
+    fn parse_reponse_ps() {
+        let json = r#"{"models":[{"name":"llama3.2:latest","size":2019393189,
+            "size_vram":2019393189,"expires_at":"2026-11-15T10:12:56.187695428Z"}]}"#;
+        let p: PsResp = serde_json::from_str(json).unwrap();
+        assert_eq!(p.models.len(), 1);
+        assert_eq!(p.models[0].name, "llama3.2:latest");
+        assert_eq!(p.models[0].size_vram, 2019393189);
+        // Aucun modèle chargé => liste vide, pas d'erreur.
+        let p: PsResp = serde_json::from_str(r#"{"models":[]}"#).unwrap();
+        assert!(p.models.is_empty());
     }
 }
