@@ -23,6 +23,9 @@ native. L'adresse du serveur est configurable au lancement et **persistée**
   - *Mettre à jour* (ligne sélectionnée)
   - *Tout mettre à jour* (séquencé)
   - *Supprimer* (confirmation modale, `DELETE /api/delete`)
+- **Onglet Moniteur** — charger ou décharger un modèle à la demande, état
+  courant identique à `ollama ps` (taille, processeur, expiration) et réglage
+  du `keep_alive` (durée de maintien en mémoire).
 
 ## Construction
 
@@ -119,6 +122,8 @@ address is configurable at startup and **persisted**
   - *Update* (selected row)
   - *Update all* (sequential)
   - *Delete* (modal confirmation, `DELETE /api/delete`)
+- **Monitor tab** — load or unload a model on demand, current state identical
+  to `ollama ps` (size, processor, expiry) and a configurable `keep_alive`.
 
 ## Building
 
