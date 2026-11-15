@@ -74,6 +74,9 @@ pub struct RunningModel {
     /// ISO 8601 (ex. 2026-11-15T10:12:56.187695428Z).
     #[serde(default)]
     pub expires_at: String,
+    /// Taille du contexte allouée par le runner, en tokens (0 si absent).
+    #[serde(default)]
+    pub context_length: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,6 +421,23 @@ pub fn keep_alive_json(raw: &str) -> serde_json::Value {
         return serde_json::json!(n);
     }
     serde_json::json!(t)
+}
+
+/// Taille du contexte en tokens, façon lisible (« 32 K », « 128 K »).
+/// `0` (champ absent de `/api/ps`) → « — ».
+pub fn fmt_context(tokens: u64) -> String {
+    if tokens == 0 {
+        return "—".to_string();
+    }
+    if tokens < 1024 {
+        return format!("{tokens}");
+    }
+    let k = tokens / 1024;
+    if tokens % 1024 == 0 {
+        format!("{k} K")
+    } else {
+        format!("{:.1} K", tokens as f64 / 1024.0)
+    }
 }
 
 /// Colonne « PROCESSOR » de `ollama ps` : part CPU/GPU déduite de `size_vram`.
@@ -802,13 +822,33 @@ mod tests {
     #[test]
     fn parse_reponse_ps() {
         let json = r#"{"models":[{"name":"llama3.2:latest","size":2019393189,
-            "size_vram":2019393189,"expires_at":"2026-11-15T10:12:56.187695428Z"}]}"#;
+            "size_vram":2019393189,"expires_at":"2026-11-15T10:12:56.187695428Z",
+            "context_length":32768}]}"#;
         let p: PsResp = serde_json::from_str(json).unwrap();
         assert_eq!(p.models.len(), 1);
         assert_eq!(p.models[0].name, "llama3.2:latest");
         assert_eq!(p.models[0].size_vram, 2019393189);
+        assert_eq!(p.models[0].context_length, 32768);
         // Aucun modèle chargé => liste vide, pas d'erreur.
         let p: PsResp = serde_json::from_str(r#"{"models":[]}"#).unwrap();
         assert!(p.models.is_empty());
+        // `context_length` absent (vieux serveur) => 0, pas d'échec de parsing.
+        let p: PsResp = serde_json::from_str(
+            r#"{"models":[{"name":"x","size":1,"size_vram":1,"expires_at":""}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.models[0].context_length, 0);
+    }
+
+    #[test]
+    fn fmt_context_tests() {
+        assert_eq!(fmt_context(0), "—");
+        assert_eq!(fmt_context(512), "512");
+        assert_eq!(fmt_context(2048), "2 K");
+        assert_eq!(fmt_context(32768), "32 K");
+        assert_eq!(fmt_context(131072), "128 K");
+        assert_eq!(fmt_context(128000), "125 K");
+        // Valeur non multiple de 1024 => une décimale.
+        assert_eq!(fmt_context(1500), "1.5 K");
     }
 }

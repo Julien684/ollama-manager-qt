@@ -24,8 +24,8 @@ native. L'adresse du serveur est configurable au lancement et **persistée**
   - *Tout mettre à jour* (séquencé)
   - *Supprimer* (confirmation modale, `DELETE /api/delete`)
 - **Onglet Moniteur** — charger ou décharger un modèle à la demande, état
-  courant identique à `ollama ps` (taille, processeur, expiration) et réglage
-  du `keep_alive` (durée de maintien en mémoire).
+  courant identique à `ollama ps` (taille, processeur, contexte, expiration)
+  et réglage du `keep_alive` (durée de maintien en mémoire).
 
 ## Construction
 
@@ -42,7 +42,7 @@ Le paquet `.eopkg` et le binaire sont fournis dans les
 
 ```bash
 sudo eopkg install -y \
-  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.1-14-1-x86_64.eopkg
+  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.2-15-1-x86_64.eopkg
 ```
 
 Ou depuis le dépôt binaire personnel : `sudo eopkg install -y ollama-manager-qt`
@@ -55,8 +55,8 @@ Un paquet `.deb` est également fourni dans les
 [releases](https://github.com/Julien684/ollama-manager-qt/releases) :
 
 ```bash
-curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.1.1-13_amd64.deb
-sudo apt install ./ollama-manager-qt_0.1.1-13_amd64.deb
+curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.1.2-14_amd64.deb
+sudo apt install ./ollama-manager-qt_0.1.2-14_amd64.deb
 ```
 
 Fonctionne sur Debian 12+ et Ubuntu 24.04+ (Qt 6 et ses dépendances sont
@@ -123,7 +123,7 @@ address is configurable at startup and **persisted**
   - *Update all* (sequential)
   - *Delete* (modal confirmation, `DELETE /api/delete`)
 - **Monitor tab** — load or unload a model on demand, current state identical
-  to `ollama ps` (size, processor, expiry) and a configurable `keep_alive`.
+  to `ollama ps` (size, processor, context, expiry) and a configurable `keep_alive`.
 
 ## Building
 
@@ -140,7 +140,7 @@ The `.eopkg` package and the binary are provided in the
 
 ```bash
 sudo eopkg install -y \
-  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.1-14-1-x86_64.eopkg
+  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.2-15-1-x86_64.eopkg
 ```
 
 Or from the personal binary repository: `sudo eopkg install -y ollama-manager-qt`
@@ -153,8 +153,8 @@ A `.deb` package is also provided in the
 [releases](https://github.com/Julien684/ollama-manager-qt/releases):
 
 ```bash
-curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.1.1-13_amd64.deb
-sudo apt install ./ollama-manager-qt_0.1.1-13_amd64.deb
+curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.1.2-14_amd64.deb
+sudo apt install ./ollama-manager-qt_0.1.2-14_amd64.deb
 ```
 
 Works on Debian 12+ and Ubuntu 24.04+ (Qt 6 and its dependencies are

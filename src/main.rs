@@ -25,9 +25,9 @@ use qtrs::prelude::*;
 use qtrs::{Application, MessageBox, TabWidget, Timer};
 
 mod ollama;
-use ollama::{fmt_bytes, fmt_date, fmt_remaining, delete_model, get_version, list_models,
-             list_running, load_model, processor_label, pull_model, unload_model, Model,
-             RunningModel};
+use ollama::{fmt_bytes, fmt_context, fmt_date, fmt_remaining, delete_model, get_version,
+             list_models, list_running, load_model, processor_label, pull_model,
+             unload_model, Model, RunningModel};
 
 // ------------------------------------------------------------------
 // Messages worker → UI
@@ -326,15 +326,16 @@ fn fill_avail(table: &TableWidget, list: &[Model]) {
     }
 }
 
-/// Remplit l'état « modèles chargés » — mêmes colonnes que `ollama ps`
-/// (nom, taille, processeur, expiration).
+/// Remplit l'état « modèles chargés » — colonnes de `ollama ps` (nom, taille,
+/// processeur, expiration) plus la taille du contexte allouée.
 fn fill_running(table: &TableWidget, list: &[RunningModel], now: i64) {
     table.set_row_count(list.len() as i32);
     for (i, m) in list.iter().enumerate() {
         table.set_item(i as i32, 0, &m.name);
         table.set_item(i as i32, 1, &fmt_bytes(m.size));
         table.set_item(i as i32, 2, &processor_label(m.size, m.size_vram));
-        table.set_item(i as i32, 3, &fmt_remaining(&m.expires_at, now));
+        table.set_item(i as i32, 3, &fmt_context(m.context_length));
+        table.set_item(i as i32, 4, &fmt_remaining(&m.expires_at, now));
     }
 }
 
@@ -450,7 +451,7 @@ fn build_ui(
     let status = Rc::new(RefCell::new(Label::new("En attente…").build()));
     let models = Rc::new(RefCell::new(Vec::new()));
     // Onglet Moniteur : état courant (`ollama ps`) + modèles disponibles.
-    let run_table = Rc::new(RefCell::new(TableWidget::new(0, 4).build()));
+    let run_table = Rc::new(RefCell::new(TableWidget::new(0, 5).build()));
     let avail_table = Rc::new(RefCell::new(TableWidget::new(0, 3).build()));
     let m_status = Rc::new(RefCell::new(Label::new("Aucun modèle chargé.").build()));
     let running = Rc::new(RefCell::new(Vec::new()));
@@ -471,12 +472,13 @@ fn build_ui(
     table.borrow_mut().set_column_width(4, 260);
     // Mêmes colonnes que `ollama ps` (NAME / SIZE / PROCESSOR / UNTIL).
     run_table.borrow_mut().set_horizontal_header_labels(&[
-        "Modèle", "Taille", "Processeur", "Expire dans",
+        "Modèle", "Taille", "Processeur", "Contexte", "Expire dans",
     ]);
-    run_table.borrow_mut().set_column_width(0, 460);
-    run_table.borrow_mut().set_column_width(1, 100);
-    run_table.borrow_mut().set_column_width(2, 160);
-    run_table.borrow_mut().set_column_width(3, 130);
+    run_table.borrow_mut().set_column_width(0, 400);
+    run_table.borrow_mut().set_column_width(1, 90);
+    run_table.borrow_mut().set_column_width(2, 150);
+    run_table.borrow_mut().set_column_width(3, 90);
+    run_table.borrow_mut().set_column_width(4, 120);
     avail_table.borrow_mut().set_horizontal_header_labels(&[
         "Modèle", "Taille", "Paramètres",
     ]);
@@ -1291,6 +1293,7 @@ mod tests {
             size: 1,
             size_vram: 1,
             expires_at: String::new(),
+            context_length: 0,
         };
         let list = vec![mk("llama3.2:latest")];
         // Sélection valide -> nom exact (c'est lui qui part dans /api/generate).
