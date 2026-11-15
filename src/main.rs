@@ -246,8 +246,22 @@ struct Ui {
     table: Rc<RefCell<TableWidget>>,
     bar: Rc<RefCell<ProgressBar>>,
     status: Rc<RefCell<Label>>,
-    /// Modèles courants (index de ligne = position dans ce Vec).
+    /// Liste complète des modèles (source de vérité, avant filtrage).
     models: Rc<RefCell<Vec<Model>>>,
+    /// Vue filtrée affichée dans l'onglet Gestion (index de ligne = position).
+    g_view: Rc<RefCell<Vec<Model>>>,
+    /// Vue filtrée affichée dans l'onglet Moniteur.
+    m_view: Rc<RefCell<Vec<Model>>>,
+    /// Champs de filtre : pointeurs C++ pour lire le texte en direct.
+    g_filter: *mut qtrs::ffi::QLineEdit,
+    m_filter: *mut qtrs::ffi::QLineEdit,
+    /// Dernières valeurs lues (on ne refiltre qu'au changement).
+    g_filter_last: Rc<RefCell<String>>,
+    m_filter_last: Rc<RefCell<String>>,
+    /// Chargement en cours : (nom, taille, instant de départ) → compteur.
+    loading: Rc<RefCell<Option<(String, u64, std::time::Instant)>>>,
+    /// Barre du Moniteur (mode indéterminé pendant un chargement).
+    m_bar: Rc<RefCell<ProgressBar>>,
     /// Onglet Moniteur : modèles chargés (`ollama ps`).
     run_table: Rc<RefCell<TableWidget>>,
     /// Onglet Moniteur : modèles disponibles au chargement.
@@ -301,9 +315,25 @@ struct Layouts {
 // Actions (utilisées par les boutons ET par le timer)
 // ------------------------------------------------------------------
 
-/// Remplit la table de l'onglet Gestion avec la liste de modèles reçue.
-fn fill_table(table: &TableWidget, models: &Rc<RefCell<Vec<Model>>>, list: Vec<Model>) {
-    models.borrow_mut().clone_from(&list);
+/// Vrai si le nom contient le filtre (insensible à la casse). Un filtre vide
+/// accepte tout.
+pub fn matches_filter(name: &str, needle: &str) -> bool {
+    let n = needle.trim().to_lowercase();
+    n.is_empty() || name.to_lowercase().contains(&n)
+}
+
+/// Applique le filtre à une liste de modèles.
+pub fn filtered(models: &[Model], needle: &str) -> Vec<Model> {
+    models
+        .iter()
+        .filter(|m| matches_filter(&m.name, needle))
+        .cloned()
+        .collect()
+}
+
+/// Remplit la table de l'onglet Gestion avec la liste (déjà filtrée) reçue.
+fn fill_table(table: &TableWidget, view: &Rc<RefCell<Vec<Model>>>, list: Vec<Model>) {
+    view.borrow_mut().clone_from(&list);
     table.set_row_count(list.len() as i32);
     for (i, m) in list.iter().enumerate() {
         table.set_item(i as i32, 0, &m.name);
@@ -316,7 +346,8 @@ fn fill_table(table: &TableWidget, models: &Rc<RefCell<Vec<Model>>>, list: Vec<M
 }
 
 /// Remplit la liste « modèles disponibles » de l'onglet Moniteur.
-fn fill_avail(table: &TableWidget, list: &[Model]) {
+fn fill_avail(table: &TableWidget, view: &Rc<RefCell<Vec<Model>>>, list: Vec<Model>) {
+    view.borrow_mut().clone_from(&list);
     table.set_row_count(list.len() as i32);
     for (i, m) in list.iter().enumerate() {
         table.set_item(i as i32, 0, &m.name);
@@ -455,6 +486,17 @@ fn build_ui(
     let avail_table = Rc::new(RefCell::new(TableWidget::new(0, 3).build()));
     let m_status = Rc::new(RefCell::new(Label::new("Aucun modèle chargé.").build()));
     let running = Rc::new(RefCell::new(Vec::new()));
+    // Filtres : vues affichées + état du chargement en cours.
+    let g_view = Rc::new(RefCell::new(Vec::new()));
+    let m_view = Rc::new(RefCell::new(Vec::new()));
+    let g_filter_last = Rc::new(RefCell::new(String::new()));
+    let m_filter_last = Rc::new(RefCell::new(String::new()));
+    let loading: Rc<RefCell<Option<(String, u64, std::time::Instant)>>> =
+        Rc::new(RefCell::new(None));
+    let m_bar = Rc::new(RefCell::new(
+        ProgressBar::new().range(0, 100).value(0).format("%p %").build(),
+    ));
+    m_bar.borrow_mut().set_has_parent();
 
     table.borrow_mut().set_has_parent();
     bar.borrow_mut().set_has_parent();
@@ -488,11 +530,19 @@ fn build_ui(
 
     let w = window.borrow();
     let wp: &dyn AsWidget = &*w;
-    let ui = Ui {
+    let mut ui = Ui {
         table: table.clone(),
         bar: bar.clone(),
         status: status.clone(),
         models: models.clone(),
+        g_view: g_view.clone(),
+        m_view: m_view.clone(),
+        g_filter: std::ptr::null_mut(),
+        m_filter: std::ptr::null_mut(),
+        g_filter_last: g_filter_last.clone(),
+        m_filter_last: m_filter_last.clone(),
+        loading: loading.clone(),
+        m_bar: m_bar.clone(),
         run_table: run_table.clone(),
         avail_table: avail_table.clone(),
         m_status: m_status.clone(),
@@ -678,6 +728,17 @@ fn build_ui(
     let mut mod_l = VBoxLayout::with_parent(&mod_box);
     mod_l.set_spacing(8);
 
+    // Filtre en direct (appliqué par la pompe, LineEdit n'ayant pas de signal).
+    // Champ créé VIDE : `LineEdit::new("…")` écrit du texte réel, pas un
+    // placeholder — un libellé séparé évite que le filtre ne s'applique à lui-même.
+    let g_filter_lbl = Label::new("Filtrer les modèles (nom ou tag)")
+        .parent(&mod_box)
+        .build();
+    mod_l.add(g_filter_lbl);
+    let g_filter = LineEdit::new("").parent(&mod_box).build();
+    let g_filter_ptr = g_filter.widget_ptr() as *mut qtrs::ffi::QLineEdit;
+    mod_l.add(g_filter);
+
     let actions_row = Widget::new().parent(&mod_box).build();
     let mut actions_l = HBoxLayout::with_parent(&actions_row);
     actions_l.set_spacing(8);
@@ -705,7 +766,8 @@ fn build_ui(
         .on_clicked({
             let tx = tx.clone();
             let status = Rc::downgrade(&status);
-            let models = models.clone();
+            // Vue filtrée : l'index de ligne correspond à ce qui est affiché.
+            let models = g_view.clone();
             let table_ref = Rc::downgrade(&table);
             move || {
                 let row = table_row(&table_ref);
@@ -788,7 +850,7 @@ fn build_ui(
         .on_clicked({
             let tx = tx.clone();
             let status = Rc::downgrade(&status);
-            let models = models.clone();
+            let models = g_view.clone();
             let table_ref = Rc::downgrade(&table);
             move || {
                 let row = table_row(&table_ref);
@@ -944,6 +1006,11 @@ fn build_ui(
     run_a.add(unload_btn);
 
     run_l.add(run_actions_row);
+    // Barre de chargement : mode indéterminé pendant le chargement d'un modèle
+    // (Ollama n'expose aucune progression), puis 100 % à la fin.
+    let m_bar_sa = wrap_scroll(&m_bar, wp);
+    unsafe { qtrs::ffi::QWidget_setFixedHeight(m_bar_sa.widget_ptr(), 30) };
+    run_l.add(m_bar_sa);
     run_l.add(wrap_scroll(&run_table, wp));
     m_l.add(run_box);
 
@@ -953,6 +1020,16 @@ fn build_ui(
         .build();
     let mut avail_l = VBoxLayout::with_parent(&avail_box);
     avail_l.set_spacing(8);
+
+    // Filtre en direct de la liste des modèles disponibles (champ vide, voir
+    // la note de l'onglet Gestion : `LineEdit::new` écrit du texte réel).
+    let m_filter_lbl = Label::new("Filtrer les modèles (nom ou tag)")
+        .parent(&avail_box)
+        .build();
+    avail_l.add(m_filter_lbl);
+    let m_filter = LineEdit::new("").parent(&avail_box).build();
+    let m_filter_ptr = m_filter.widget_ptr() as *mut qtrs::ffi::QLineEdit;
+    avail_l.add(m_filter);
     let avail_actions_row = Widget::new().parent(&avail_box).build();
     let mut avail_a = HBoxLayout::with_parent(&avail_actions_row);
     avail_a.set_spacing(8);
@@ -961,9 +1038,11 @@ fn build_ui(
         .on_clicked({
             let tx = tx.clone();
             let mstatus = Rc::downgrade(&m_status);
-            let models = models.clone();
+            let models = m_view.clone();
             let avail_ref = Rc::downgrade(&avail_table);
             let api_p = api_ptr;
+            let loading = loading.clone();
+            let m_bar = m_bar.clone();
             move || {
                 let row = table_row(&avail_ref);
                 let Some(name) = model_name_at(&models.borrow(), row) else {
@@ -974,6 +1053,7 @@ fn build_ui(
                     });
                     return;
                 };
+                let size = models.borrow().get(row as usize).map(|m| m.size).unwrap_or(0);
                 let url = load_server_url();
                 if url.trim().is_empty() {
                     set_status(&mstatus, "Enregistrez d'abord l'adresse du serveur.");
@@ -987,9 +1067,14 @@ fn build_ui(
                 };
                 // Mémorise la durée choisie pour les prochaines ouvertures.
                 save_config(&url, &read_line_edit(api_p), &ka_txt);
+                // Barre indéterminée + compteur : Ollama n'expose aucune
+                // progression pendant le chargement, mais l'utilisateur voit
+                // que ça avance (temps écoulé) au lieu de croire à un blocage.
+                m_bar.borrow().set_range(0, 0);
+                *loading.borrow_mut() = Some((name.clone(), size, std::time::Instant::now()));
                 set_status(
                     &mstatus,
-                    &format!("Chargement de {name} (keep_alive {ka_txt})…"),
+                    &format!("Chargement de {name} ({}) — 0 s", fmt_bytes(size)),
                 );
                 let tw = tx.clone();
                 std::thread::spawn(move || {
@@ -1019,6 +1104,10 @@ fn build_ui(
     tabs.add_tab(Box::new(m_page), "Moniteur");
     root.add(tabs);
     w.set_central_widget(&central);
+
+    // Pointeurs des champs de filtre (lus par la pompe).
+    ui.g_filter = g_filter_ptr;
+    ui.m_filter = m_filter_ptr;
 
     let layouts = Layouts {
         root,
@@ -1103,6 +1192,15 @@ fn main() {
             let bar = Rc::downgrade(&ui.bar);
             let status = Rc::downgrade(&ui.status);
             let models = Rc::clone(&ui.models); // Vec, pas un widget
+            // Filtres (texte lu en direct) et état de chargement.
+            let g_view = Rc::clone(&ui.g_view);
+            let m_view = Rc::clone(&ui.m_view);
+            let g_filter = ui.g_filter;
+            let m_filter = ui.m_filter;
+            let g_filter_last = Rc::clone(&ui.g_filter_last);
+            let m_filter_last = Rc::clone(&ui.m_filter_last);
+            let loading = Rc::clone(&ui.loading);
+            let m_bar = Rc::downgrade(&ui.m_bar);
             // Onglet Moniteur.
             let run_table = Rc::downgrade(&ui.run_table);
             let avail_table = Rc::downgrade(&ui.avail_table);
@@ -1119,11 +1217,26 @@ fn main() {
                             else {
                                 continue;
                             };
+                            models.borrow_mut().clone_from(&parsed);
+                            // Filtres courants (relus ici : la liste peut
+                            // arriver après une saisie dans le champ).
+                            let ng = if g_filter.is_null() {
+                                String::new()
+                            } else {
+                                read_line_edit(g_filter)
+                            };
+                            let nm = if m_filter.is_null() {
+                                String::new()
+                            } else {
+                                read_line_edit(m_filter)
+                            };
+                            *g_filter_last.borrow_mut() = ng.clone();
+                            *m_filter_last.borrow_mut() = nm.clone();
+                            fill_table(&t.borrow(), &g_view, filtered(&parsed, &ng));
                             // La liste alimente aussi l'onglet Moniteur.
                             if let Some(at) = avail_table.upgrade() {
-                                fill_avail(&at.borrow(), &parsed);
+                                fill_avail(&at.borrow(), &m_view, filtered(&parsed, &nm));
                             }
-                            fill_table(&t.borrow(), &models, parsed);
                             set_status(
                                 &status,
                                 &format!("{} modèle(s) chargé(s).", count),
@@ -1154,6 +1267,12 @@ fn main() {
                         }
                         WorkerMsg::MonitorDone { ok, message } => {
                             let mark = if ok { "✔" } else { "✘" };
+                            // Fin du chargement : barre à 100 % (ou 0 en échec).
+                            *loading.borrow_mut() = None;
+                            if let Some(b) = m_bar.upgrade() {
+                                b.borrow().set_range(0, 100);
+                                b.borrow().set_value(if ok { 100 } else { 0 });
+                            }
                             set_status(&m_status, &format!("{mark} {message}"));
                             let url = load_server_url();
                             if !url.trim().is_empty() {
@@ -1185,6 +1304,40 @@ fn main() {
                             }
                         }
                     }
+                }
+
+                // ---- Filtres : refiltrer seulement quand le texte change ----
+                if !g_filter.is_null() {
+                    let needle = read_line_edit(g_filter);
+                    if *g_filter_last.borrow() != needle {
+                        *g_filter_last.borrow_mut() = needle.clone();
+                        if let Some(t) = table.upgrade() {
+                            let list = filtered(&models.borrow(), &needle);
+                            fill_table(&t.borrow(), &g_view, list);
+                        }
+                    }
+                }
+                if !m_filter.is_null() {
+                    let needle = read_line_edit(m_filter);
+                    if *m_filter_last.borrow() != needle {
+                        *m_filter_last.borrow_mut() = needle.clone();
+                        if let Some(at) = avail_table.upgrade() {
+                            let list = filtered(&models.borrow(), &needle);
+                            fill_avail(&at.borrow(), &m_view, list);
+                        }
+                    }
+                }
+
+                // ---- Compteur de chargement (Ollama ne donne pas de %) ------
+                if let Some((name, size, t0)) = loading.borrow().as_ref() {
+                    let secs = t0.elapsed().as_secs();
+                    set_status(
+                        &m_status,
+                        &format!(
+                            "⏳ Chargement de {name} ({}) — {secs} s",
+                            fmt_bytes(*size)
+                        ),
+                    );
                 }
             }
         })
@@ -1284,6 +1437,36 @@ mod tests {
         assert_eq!(model_name_at(&models, 2), None);
         // Liste vide.
         assert_eq!(model_name_at(&[], 0), None);
+    }
+
+    #[test]
+    fn filtre_insensible_a_la_casse() {
+        let mk = |n: &str| Model {
+            name: n.to_string(),
+            size: 0,
+            modified_at: String::new(),
+            params: String::new(),
+            quant: String::new(),
+            caps: String::new(),
+        };
+        let models = vec![
+            mk("llama3.2:3b"),
+            mk("Qwen2.5:7b"),
+            mk("nomic-embed-text:latest"),
+        ];
+        // Filtre vide ou blanc => tout passe.
+        assert_eq!(filtered(&models, "").len(), 3);
+        assert_eq!(filtered(&models, "   ").len(), 3);
+        // Insensible à la casse.
+        assert_eq!(filtered(&models, "QWEN").len(), 1);
+        assert_eq!(filtered(&models, "qwen")[0].name, "Qwen2.5:7b");
+        // Sous-chaîne, tag compris.
+        assert_eq!(filtered(&models, "embed").len(), 1);
+        assert_eq!(filtered(&models, "3b").len(), 1);
+        // Aucun résultat.
+        assert_eq!(filtered(&models, "absent").len(), 0);
+        // La correspondance porte sur le nom, pas sur les métadonnées.
+        assert!(!matches_filter("llama3.2:3b", "Q4"));
     }
 
     #[test]
