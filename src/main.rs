@@ -285,10 +285,6 @@ struct Layouts {
     actions: HBoxLayout,
     #[allow(dead_code)]
     modbox: VBoxLayout,
-    #[allow(dead_code)]
-    bar_row: VBoxLayout,
-    #[allow(dead_code)]
-    log_row: VBoxLayout,
     /// Layouts des deux pages d'onglets et des boîtes du Moniteur.
     #[allow(dead_code)]
     g_page: VBoxLayout,
@@ -354,6 +350,7 @@ fn fill_avail(table: &TableWidget, view: &Rc<RefCell<Vec<Model>>>, list: Vec<Mod
         table.set_item(i as i32, 1, &fmt_bytes(m.size));
         let meta = format!("{} {}", m.params, m.quant).trim().to_string();
         table.set_item(i as i32, 2, &meta);
+        table.set_item(i as i32, 3, &m.caps);
     }
 }
 
@@ -483,7 +480,7 @@ fn build_ui(
     let models = Rc::new(RefCell::new(Vec::new()));
     // Onglet Moniteur : état courant (`ollama ps`) + modèles disponibles.
     let run_table = Rc::new(RefCell::new(TableWidget::new(0, 5).build()));
-    let avail_table = Rc::new(RefCell::new(TableWidget::new(0, 3).build()));
+    let avail_table = Rc::new(RefCell::new(TableWidget::new(0, 4).build()));
     let m_status = Rc::new(RefCell::new(Label::new("Aucun modèle chargé.").build()));
     let running = Rc::new(RefCell::new(Vec::new()));
     // Filtres : vues affichées + état du chargement en cours.
@@ -522,11 +519,12 @@ fn build_ui(
     run_table.borrow_mut().set_column_width(3, 90);
     run_table.borrow_mut().set_column_width(4, 120);
     avail_table.borrow_mut().set_horizontal_header_labels(&[
-        "Modèle", "Taille", "Paramètres",
+        "Modèle", "Taille", "Paramètres", "Capacités",
     ]);
-    avail_table.borrow_mut().set_column_width(0, 460);
-    avail_table.borrow_mut().set_column_width(1, 100);
-    avail_table.borrow_mut().set_column_width(2, 160);
+    avail_table.borrow_mut().set_column_width(0, 380);
+    avail_table.borrow_mut().set_column_width(1, 90);
+    avail_table.borrow_mut().set_column_width(2, 130);
+    avail_table.borrow_mut().set_column_width(3, 220);
 
     let w = window.borrow();
     let wp: &dyn AsWidget = &*w;
@@ -890,25 +888,17 @@ fn build_ui(
     mod_l.add(wrap_scroll(&table, wp));
     g_l.add(mod_box);
 
-    // ---- Barre de progression (pleine largeur, centree en hauteur) ----------
-    let bar_row = Widget::new().parent(&g_page).build();
-    bar_row.set_max_size(16_777_215, 58);
-    bar_row.set_min_size(0, 46);
-    let mut bar_v = VBoxLayout::with_parent(&bar_row);
-    bar_v.set_spacing(0);
-    bar_v.add_spacer(Spacer::vertical_expanding());
-    bar_v.add(wrap_scroll(&bar, wp));
-    bar_v.add_spacer(Spacer::vertical_expanding());
-    g_l.add(bar_row);
+    // ---- Barre de progression (ligne compacte, sans espace vertical) -------
+    // Pas de Widget intermediaire ni de spacers verticaux : la barre occupe
+    // une seule ligne de 30 px, comme dans l'onglet Moniteur.
+    let bar_sa = wrap_scroll(&bar, wp);
+    unsafe { qtrs::ffi::QWidget_setFixedHeight(bar_sa.widget_ptr(), 30) };
+    g_l.add(bar_sa);
 
-    // ---- Logs / statut (pleine largeur, sous la barre) ----------------------
-    let log_row = Widget::new().parent(&g_page).build();
-    log_row.set_max_size(16_777_215, 130);
-    log_row.set_min_size(0, 80);
-    let mut log_v = VBoxLayout::with_parent(&log_row);
-    log_v.set_spacing(0);
-    log_v.add(wrap_scroll(&status, wp));
-    g_l.add(log_row);
+    // ---- Statut (une seule ligne, sous la barre) ---------------------------
+    let status_sa = wrap_scroll(&status, wp);
+    unsafe { qtrs::ffi::QWidget_setFixedHeight(status_sa.widget_ptr(), 30) };
+    g_l.add(status_sa);
 
     // ================= Page « Moniteur » ====================================
     let m_page = Widget::new().build();
@@ -1116,8 +1106,6 @@ fn build_ui(
         dl: dl_g,
         actions: actions_l,
         modbox: mod_l,
-        bar_row: bar_v,
-        log_row: log_v,
         g_page: g_l,
         m_page: m_l,
         ka_grid: ka_g,
