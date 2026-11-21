@@ -1227,7 +1227,7 @@ fn main() {
                             }
                             set_status(
                                 &status,
-                                &format!("{} modèle(s) chargé(s).", count),
+                                &format!("{} modèle(s) disponible(s).", count),
                             );
                         }
                         WorkerMsg::List(None, err) => {

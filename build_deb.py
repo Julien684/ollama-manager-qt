@@ -26,8 +26,8 @@ SRC_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
 OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME = "ollama-manager-qt"
-VERSION = "0.1.4"
-DEB_REVISION = 16
+VERSION = "0.1.5"
+DEB_REVISION = 18
 ARCH = "amd64"
 MAINTAINER = "Julien <julien_solus@use.startmail.com>"
 HOMEPAGE = "https://github.com/Julien684/ollama-manager-qt"
