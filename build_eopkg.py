@@ -29,8 +29,8 @@ SRC_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
 OUT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC_DIR
 
 PACKAGE_NAME   = "ollama-manager-qt"
-VERSION        = "0.1.5"
-RELEASE        = 18
+VERSION        = "0.2.0"
+RELEASE        = 19
 DIST_RELEASE   = 1
 ARCH           = "x86_64"
 DIST_NAME      = "Solus"
@@ -81,7 +81,9 @@ _FR_DESCRIPTION = """ollama-manager-qt est un petit gestionnaire graphique (Qt6)
 Rust, pour administrer un serveur Ollama : telechargement de modeles avec
 barre de progression en direct, mise a jour d'un modele ou de tous les
 modeaux, suppression avec confirmation, et liste des modeaux locaux (nom,
-taille, parametres, date, capacites). L'adresse du serveur est configurable
+taille, parametres, date, capacites), et un onglet Modelfiles pour ecrire,
+importer et creer des modeles a partir de Modelfiles via l'API HTTP (sans
+acceder au conteneur du serveur). L'adresse du serveur est configurable
 au lancement et persistee dans QSettings. Binaire unique (~3 Mo) sans
 dependance runtime a part qt6-base (fourni par le systeme). Non officiel."""
 
@@ -194,7 +196,10 @@ def build():
         <Description xml:lang="en">{a("""ollama-manager-qt is a small graphical Qt6 manager, written in Rust
 (via qtrs), for administering an Ollama server: model download with a live
 progress bar, updating one model or all of them, removal with confirmation,
-and a table of local models (name, size, parameters, date, capabilities).
+and a table of local models (name, size, parameters, date, capabilities), a
+monitor tab to load/unload models with keep_alive, and a Modelfiles tab to
+write, import and create models from Modelfiles via the HTTP API (no server
+container access needed).
 The server address is configurable at startup and persisted in QSettings.
 Single binary (~3 MB) with no runtime dependency beyond qt6-base
 (system-provided). Unofficial.""")}</Description>
@@ -206,7 +211,7 @@ Single binary (~3 MB) with no runtime dependency beyond qt6-base
             <Update release="{RELEASE}">
                 <Date>{date.today().isoformat()}</Date>
                 <Version>{VERSION}</Version>
-                <Comment>{PACKAGE_NAME} {VERSION} : onglet Gestion, statut « modele(s) disponible(s) »</Comment>
+                <Comment>{PACKAGE_NAME} {VERSION} : onglet Modelfiles (edition, persistance, import depuis le serveur, creation via /api/create)</Comment>
                 <Name>{PACKAGER_NAME}</Name>
                 <Email>{PACKAGER_EMAIL}</Email>
             </Update>

@@ -301,6 +301,298 @@ pub fn delete_model(base: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Modelfile analysé côté client (Ollama ≥ 0.4 exige les champs structurés).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ParsedModelfile {
+    pub from: Option<String>,
+    pub template: Option<String>,
+    pub system: Option<String>,
+    pub license: Option<String>,
+    pub adapters: Vec<String>,
+    /// Paramètres dans l'ordre, doublons autorisés (ex. plusieurs `stop`).
+    pub parameters: Vec<(String, String)>,
+    /// Messages `MESSAGE role contenu`.
+    pub messages: Vec<(String, String)>,
+}
+
+/// Retire les guillemets d'une valeur de Modelfile et décode les échappements.
+fn unquote_modelfile_value(s: &str) -> String {
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        let inner = &s[1..s.len() - 1];
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some('r') => out.push('\r'),
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    } else {
+        s.to_string()
+    }
+}
+
+/// Analyse un Modelfile (FROM, PARAMETER, TEMPLATE, SYSTEM, LICENSE, ADAPTER,
+/// MESSAGE). Gère les valeurs entre triple guillemets sur plusieurs lignes.
+pub fn parse_modelfile(text: &str) -> ParsedModelfile {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = ParsedModelfile::default();
+    let mut i = 0;
+    while i < lines.len() {
+        let raw = lines[i].trim();
+        i += 1;
+        if raw.is_empty() || raw.starts_with('#') {
+            continue;
+        }
+        let (kw, rest) = match raw.split_once(char::is_whitespace) {
+            Some((k, r)) => (k.to_ascii_uppercase(), r.trim_start()),
+            None => (raw.to_ascii_uppercase(), ""),
+        };
+        // Valeur : bloc """…""" (multi-ligne) ou valeur simple entre guillemets.
+        let value = if let Some(after) = rest.strip_prefix("\"\"\"") {
+            let mut buf = String::new();
+            if let Some(pos) = after.find("\"\"\"") {
+                buf.push_str(&after[..pos]);
+            } else {
+                buf.push_str(after);
+                buf.push('\n');
+                while i < lines.len() {
+                    let l = lines[i];
+                    i += 1;
+                    if let Some(pos) = l.find("\"\"\"") {
+                        buf.push_str(&l[..pos]);
+                        break;
+                    }
+                    buf.push_str(l);
+                    buf.push('\n');
+                }
+            }
+            buf
+        } else {
+            unquote_modelfile_value(rest)
+        };
+        match kw.as_str() {
+            "FROM" => out.from = Some(value),
+            "PARAMETER" => {
+                if let Some((k, v)) = value.split_once(char::is_whitespace) {
+                    out.parameters
+                        .push((k.to_string(), unquote_modelfile_value(v)));
+                }
+            }
+            "TEMPLATE" => out.template = Some(value),
+            "SYSTEM" => out.system = Some(value),
+            "LICENSE" => out.license = Some(value),
+            "ADAPTER" => out.adapters.push(value),
+            "MESSAGE" => {
+                if let Some((role, content)) = value.split_once(char::is_whitespace) {
+                    out.messages
+                        .push((role.to_string(), unquote_modelfile_value(content)));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Convertit une valeur de PARAMETER en JSON : nombre si possible, sinon texte.
+fn parameter_json_value(v: &str) -> serde_json::Value {
+    if let Ok(i) = v.parse::<i64>() {
+        return serde_json::json!(i);
+    }
+    if let Ok(f) = v.parse::<f64>() {
+        return serde_json::json!(f);
+    }
+    serde_json::json!(v)
+}
+
+/// Construit le corps JSON de `POST /api/create`.
+///
+/// Envoie à la fois les champs structurés (`from`, `parameters`, …) exigés par
+/// Ollama ≥ 0.4 et l'ancien champ `modelfile` (ignoré par les versions
+/// récentes, requis par les anciennes).
+fn create_payload(model_name: &str, modelfile_content: &str) -> serde_json::Value {
+    let parsed = parse_modelfile(modelfile_content);
+    let mut obj = serde_json::Map::new();
+    obj.insert("model".into(), serde_json::json!(model_name));
+    obj.insert("name".into(), serde_json::json!(model_name));
+    obj.insert("stream".into(), serde_json::json!(false));
+    obj.insert(
+        "modelfile".into(),
+        serde_json::json!(modelfile_content),
+    );
+    if let Some(f) = &parsed.from {
+        obj.insert("from".into(), serde_json::json!(f));
+    }
+    if let Some(t) = &parsed.template {
+        obj.insert("template".into(), serde_json::json!(t));
+    }
+    if let Some(s) = &parsed.system {
+        obj.insert("system".into(), serde_json::json!(s));
+    }
+    if let Some(l) = &parsed.license {
+        obj.insert("license".into(), serde_json::json!(l));
+    }
+    if !parsed.adapters.is_empty() {
+        obj.insert("adapters".into(), serde_json::json!(parsed.adapters));
+    }
+    // Paramètres : doublons (ex. `stop`) deviennent un tableau.
+    let mut params = serde_json::Map::new();
+    for (k, v) in &parsed.parameters {
+        let val = parameter_json_value(v);
+        match params.get_mut(k) {
+            None => {
+                params.insert(k.clone(), val);
+            }
+            Some(existing) => {
+                let arr = match existing {
+                    serde_json::Value::Array(a) => a,
+                    _ => {
+                        let old = existing.take();
+                        *existing = serde_json::Value::Array(vec![old]);
+                        existing.as_array_mut().unwrap()
+                    }
+                };
+                arr.push(val);
+            }
+        }
+    }
+    if !params.is_empty() {
+        obj.insert("parameters".into(), serde_json::Value::Object(params));
+    }
+    if !parsed.messages.is_empty() {
+        let msgs: Vec<serde_json::Value> = parsed
+            .messages
+            .iter()
+            .map(|(role, content)| {
+                serde_json::json!({ "role": role, "content": content })
+            })
+            .collect();
+        obj.insert("messages".into(), serde_json::Value::Array(msgs));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Réponse de `POST /api/show` (champs utiles à l'import de Modelfiles).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ShowInfo {
+    #[serde(default)]
+    pub modelfile: Option<String>,
+    /// Bloc texte des paramètres (« temperature 0.7\nstop "END" »).
+    #[serde(default)]
+    pub parameters: Option<String>,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+}
+
+/// Échappe une chaîne pour une valeur entre guillemets de Modelfile.
+fn escape_modelfile_value(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Reconstruit un Modelfile à partir des champs structurés de `/api/show`
+/// (utilisé quand le serveur ne renvoie pas le champ `modelfile`).
+pub fn reconstruct_modelfile(model_name: &str, info: &ShowInfo) -> String {
+    let mut out = format!("FROM {model_name}\n");
+    if let Some(p) = &info.parameters {
+        for line in p.lines() {
+            let l = line.trim();
+            if !l.is_empty() {
+                out.push_str("PARAMETER ");
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+    }
+    if let Some(s) = &info.system {
+        if !s.trim().is_empty() {
+            out.push_str(&format!("SYSTEM \"{}\"\n", escape_modelfile_value(s)));
+        }
+    }
+    if let Some(t) = &info.template {
+        if !t.trim().is_empty() {
+            out.push_str("TEMPLATE \"\"\"\n");
+            out.push_str(t);
+            if !t.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("\"\"\"\n");
+        }
+    }
+    if let Some(l) = &info.license {
+        let first = l.lines().next().unwrap_or("").trim();
+        if !first.is_empty() {
+            out.push_str(&format!("LICENSE \"{}\"\n", escape_modelfile_value(first)));
+        }
+    }
+    out
+}
+
+/// `POST /api/show` — métadonnées d'un modèle, dont son Modelfile.
+pub fn show_model(base: &str, name: &str) -> Result<ShowInfo> {
+    let body = serde_json::json!({ "model": name, "verbose": false });
+    let r = with_auth(
+        agent(base)
+            .post(&url(base, "/api/show"))
+            .set("Content-Type", "application/json"),
+    )
+    .send_string(&body.to_string())
+    .map_err(|e| map_ureq_err(base, e))?;
+    r.into_json::<ShowInfo>()
+        .map_err(|e| OllamaError::Protocol(e.to_string()))
+}
+
+/// `POST /api/create` — crée un modèle à partir d'un Modelfile.
+///
+/// Le Modelfile est analysé côté client, car Ollama ≥ 0.4 refuse le champ
+/// `modelfile` brut (« neither 'from' or 'files' was specified »).
+/// Renvoie `Err(OllamaError::Server)` en cas d'erreur renvoyée par le serveur.
+pub fn create_model(
+    base: &str,
+    model_name: &str,
+    modelfile_content: &str,
+) -> Result<()> {
+    let body = create_payload(model_name, modelfile_content);
+    let resp = with_auth(
+        agent(base)
+            .post(&url(base, "/api/create"))
+            .set("Content-Type", "application/json"),
+    )
+    .send_string(&body.to_string())
+    .map_err(|e| map_ureq_err(base, e))?;
+
+    // Ollama renvoie éventuellement un message JSON en body (ex. "success").
+    let resp_text = resp.into_string().unwrap_or_default();
+    // On retourne une erreur si le corps indique une erreur (certains proxies
+    // ou versions antérieures peuvent le faire au lieu de HTTP 4xx).
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp_text) {
+        if let Some(e) = v.get("error").and_then(|x| x.as_str()) {
+            if !e.is_empty() {
+                return Err(OllamaError::Server(e.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `POST /api/pull` en streaming — télécharge (ou met à jour) un modèle.
 ///
 /// Appelle `progress` à chaque événement de progression avec
@@ -850,5 +1142,78 @@ mod tests {
         assert_eq!(fmt_context(128000), "125 K");
         // Valeur non multiple de 1024 => une décimale.
         assert_eq!(fmt_context(1500), "1.5 K");
+    }
+
+    #[test]
+    fn parse_modelfile_directives() {
+        let text = "# commentaire\nFROM llama3.2:3b\nPARAMETER temperature 0.7\nPARAMETER stop \"END\"\nPARAMETER stop \"STOP\"\nSYSTEM \"Tu es un assistant.\"\nTEMPLATE \"\"\"{{ .System }}\n{{ .Prompt }}\"\"\"\n";
+        let p = parse_modelfile(text);
+        assert_eq!(p.from.as_deref(), Some("llama3.2:3b"));
+        assert_eq!(p.system.as_deref(), Some("Tu es un assistant."));
+        assert_eq!(
+            p.parameters,
+            vec![
+                ("temperature".to_string(), "0.7".to_string()),
+                ("stop".to_string(), "END".to_string()),
+                ("stop".to_string(), "STOP".to_string()),
+            ]
+        );
+        assert_eq!(
+            p.template.as_deref(),
+            Some("{{ .System }}\n{{ .Prompt }}")
+        );
+        // Les commentaires ne sont pas des directives.
+        assert!(p.adapters.is_empty());
+    }
+
+    #[test]
+    fn create_payload_structure() {
+        let body = create_payload(
+            "mon-modele",
+            "FROM qwen3:8b\nPARAMETER temperature 0.2\nPARAMETER stop \"FIN\"\nPARAMETER stop \"END\"\nSYSTEM \"Court.\"\n",
+        );
+        assert_eq!(body["model"], "mon-modele");
+        assert_eq!(body["stream"], serde_json::json!(false));
+        // Compat : l'ancien champ texte reste présent.
+        assert!(body["modelfile"].as_str().unwrap().contains("FROM qwen3:8b"));
+        // Champ structuré exigé par Ollama >= 0.4.
+        assert_eq!(body["from"], "qwen3:8b");
+        assert_eq!(body["system"], "Court.");
+        assert_eq!(body["parameters"]["temperature"], serde_json::json!(0.2));
+        // Paramètres répétés -> tableau.
+        assert_eq!(
+            body["parameters"]["stop"],
+            serde_json::json!(["FIN", "END"])
+        );
+    }
+
+    #[test]
+    fn create_payload_sans_from() {
+        // Un Modelfile sans FROM ne produit pas de champ `from` : le serveur
+        // renverra son erreur explicite, qu'on remonte telle quelle.
+        let body = create_payload("x", "# vide\n");
+        assert!(body.get("from").is_none());
+        assert_eq!(body["model"], "x");
+    }
+
+    #[test]
+    fn reconstruct_modelfile_depuis_champs() {
+        let info = ShowInfo {
+            modelfile: None,
+            parameters: Some("temperature 0.7\nstop \"END\"".to_string()),
+            template: Some("{{ .Prompt }}".to_string()),
+            system: Some("Tu es bref.".to_string()),
+            license: Some("MIT".to_string()),
+        };
+        let mf = reconstruct_modelfile("qwen3:8b", &info);
+        assert!(mf.starts_with("FROM qwen3:8b\n"));
+        assert!(mf.contains("PARAMETER temperature 0.7\n"));
+        assert!(mf.contains("PARAMETER stop \"END\"\n"));
+        assert!(mf.contains("SYSTEM \"Tu es bref.\"\n"));
+        assert!(mf.contains("TEMPLATE \"\"\"\n{{ .Prompt }}\n\"\"\"\n"));
+        assert!(mf.contains("LICENSE \"MIT\"\n"));
+        // Le résultat doit se reparser à l'identique.
+        let parsed = parse_modelfile(&mf);
+        assert_eq!(parsed.from.as_deref(), Some("qwen3:8b"));
     }
 }

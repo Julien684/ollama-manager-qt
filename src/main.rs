@@ -22,11 +22,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use qtrs::prelude::*;
-use qtrs::{Application, MessageBox, TabWidget, Timer};
+use qtrs::{Application, MessageBox, PlainTextEdit, TabWidget, Timer};
 
 mod ollama;
-use ollama::{fmt_bytes, fmt_context, fmt_date, fmt_remaining, delete_model, get_version,
+use ollama::{fmt_bytes, fmt_context, fmt_date, fmt_remaining, create_model, delete_model, get_version,
              list_models, list_running, load_model, processor_label, pull_model,
+             reconstruct_modelfile, show_model,
              unload_model, Model, RunningModel};
 
 // ------------------------------------------------------------------
@@ -43,6 +44,10 @@ enum WorkerMsg {
     ActionDone { name: String, ok: bool, message: String },
     /// Fin d'un chargement / déchargement depuis l'onglet Moniteur.
     MonitorDone { ok: bool, message: String },
+    /// Fin d'une création de modèle depuis un Modelfile (onglet Modelfiles).
+    CreateDone { name: String, ok: bool, message: String },
+    /// Fin d'un import de Modelfiles : (liste JSON [(nom, contenu)], erreurs, message).
+    ImportDone(Option<String>, usize, String),
 }
 
 /// Un seul `GET /api/ps` à la fois : sans ce verrou, un serveur injoignable
@@ -149,6 +154,73 @@ fn save_config(url: &str, api_key: &str, keep_alive: &str) {
     let _ = std::fs::write(&path, out);
 }
 
+// ------------------------------------------------------------------
+// Persistance des Modelfiles (fichier JSON à côté de l'INI)
+// ------------------------------------------------------------------
+
+/// Un Modelfile sauvegardé localement : un nom (double comme nom du modèle
+/// cible sur le serveur Ollama) et le contenu texte du Modelfile.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ModelfileEntry {
+    pub name: String,
+    pub content: String,
+}
+
+/// Chemin du fichier JSON des Modelfiles (~/.config/OllamaManager/...).
+fn modelfiles_path() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(".config")
+        .join(SETTINGS_ORG)
+        .join(format!("{SETTINGS_APP}-modelfiles.json"))
+}
+
+/// Charge la liste des Modelfiles depuis le JSON (liste vide si absent/cassé).
+fn load_modelfiles() -> Vec<ModelfileEntry> {
+    let content = std::fs::read_to_string(modelfiles_path()).unwrap_or_default();
+    if content.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<ModelfileEntry>>(&content).unwrap_or_default()
+}
+
+/// Sauvegarde la liste des Modelfiles en JSON (crée le dossier si besoin).
+fn save_modelfiles(entries: &[ModelfileEntry]) {
+    let path = modelfiles_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(entries) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// Insère ou remplace une entrée par nom (sans doublon) dans la liste.
+pub fn upsert_modelfile(entries: &mut Vec<ModelfileEntry>, name: &str, content: &str) {
+    let name = name.trim();
+    if let Some(e) = entries.iter_mut().find(|e| e.name == name) {
+        e.content = content.to_string();
+    } else {
+        entries.push(ModelfileEntry {
+            name: name.to_string(),
+            content: content.to_string(),
+        });
+    }
+}
+
+/// Remplit la table de l'onglet Modelfiles (nom, taille du contenu).
+fn fill_modelfiles(table: &TableWidget, entries: &[ModelfileEntry]) {
+    table.set_row_count(entries.len() as i32);
+    for (i, e) in entries.iter().enumerate() {
+        table.set_item(i as i32, 0, &e.name);
+        table.set_item(i as i32, 1, &format!("{} car.", e.content.chars().count()));
+    }
+}
+
 /// Applique au client HTTP la clé API saisie dans un champ (vide = aucune).
 fn apply_api_key_from(ptr: *mut qtrs::ffi::QLineEdit) {
     let key = read_line_edit(ptr);
@@ -158,6 +230,115 @@ fn apply_api_key_from(ptr: *mut qtrs::ffi::QLineEdit) {
 /// Lit le texte courant d'un `QLineEdit` via son pointeur C++.
 fn read_line_edit(ptr: *mut qtrs::ffi::QLineEdit) -> String {
     unsafe { qtrs::ffi::QLineEdit_text(ptr) }
+}
+
+/// Écrit le texte d'un `QLineEdit` via son pointeur C++ (null = no-op).
+fn set_line_edit(ptr: *mut qtrs::ffi::QLineEdit, text: &str) {
+    if ptr.is_null() {
+        return;
+    }
+    cxx::let_cxx_string!(c = text);
+    unsafe { qtrs::ffi::QLineEdit_setText(ptr, &c) };
+}
+
+// ---- ComboBox (liste des modèles pour préremplir FROM) ----------------
+
+fn combo_clear(ptr: *mut qtrs::ffi::QComboBox) {
+    if !ptr.is_null() {
+        unsafe { qtrs::ffi::QComboBox_clear(ptr) };
+    }
+}
+
+fn combo_add(ptr: *mut qtrs::ffi::QComboBox, text: &str) {
+    if ptr.is_null() {
+        return;
+    }
+    cxx::let_cxx_string!(c = text);
+    unsafe { qtrs::ffi::QComboBox_addItem(ptr, &c) };
+}
+
+fn combo_current(ptr: *mut qtrs::ffi::QComboBox) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { qtrs::ffi::QComboBox_currentText(ptr) }
+    }
+}
+
+fn combo_set_index(ptr: *mut qtrs::ffi::QComboBox, index: i32) {
+    if !ptr.is_null() {
+        unsafe { qtrs::ffi::QComboBox_setCurrentIndex(ptr, index) };
+    }
+}
+
+/// Remplace (ou insère) la ligne `FROM` d'un Modelfile. Fonction pure, testable.
+pub fn set_from_in_modelfile(text: &str, model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        return text.to_string();
+    }
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut replaced = false;
+    for line in lines.iter_mut() {
+        let up = line.trim_start().to_ascii_uppercase();
+        if up == "FROM" || up.starts_with("FROM ") || up.starts_with("FROM\t") {
+            *line = format!("FROM {model}");
+            replaced = true;
+            break;
+        }
+    }
+    let mut out = if replaced {
+        lines.join("\n")
+    } else if text.trim().is_empty() {
+        format!("FROM {model}")
+    } else {
+        format!("FROM {model}\n{}", text.trim_start_matches('\n'))
+    };
+    if text.ends_with('\n') && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Normalise un Modelfile importé via `/api/show` : le `FROM` d'un modèle tiré
+/// du registre pointe vers un blob interne au serveur
+/// (`/root/.ollama/models/blobs/sha256-…`), inutilisable pour recréer via
+/// l'API. On le remplace par le nom du modèle, qui est l'usage voulu
+/// (« dériver un modèle depuis ce modèle »). Les autres `FROM` (nom de
+/// modèle, chemin GGUF) sont conservés.
+pub fn normalise_imported_modelfile(model: &str, content: &str) -> String {
+    match ollama::parse_modelfile(content).from {
+        Some(f) if f.trim().starts_with('/') && f.contains("/blobs/") => {
+            set_from_in_modelfile(content, model)
+        }
+        _ => content.to_string(),
+    }
+}
+
+/// Modelfile d'exemple, à adapter. `from` = modèle choisi dans la liste
+/// déroulante (valeur de repli si vide ou placeholder).
+pub fn example_modelfile(from: &str) -> String {
+    let from = from.trim();
+    let from = if from.is_empty() || from.starts_with('—') {
+        "llama3.2:3b"
+    } else {
+        from
+    };
+    let mut s = String::new();
+    s.push_str("# Exemple — adaptez les valeurs puis « Enregistrer la liste »\n");
+    s.push_str(&format!("FROM {from}\n"));
+    s.push_str("PARAMETER temperature 0.7\n");
+    s.push_str("PARAMETER top_p 0.9\n");
+    s.push_str("PARAMETER top_k 40\n");
+    s.push_str("PARAMETER repeat_penalty 1.1\n");
+    s.push_str("PARAMETER num_ctx 4096\n");
+    s.push_str("PARAMETER stop \"<|endoftext|>\"\n");
+    s.push_str(
+        "SYSTEM \"\"\"Tu es un assistant concis, précis et utile. Réponds en français.\"\"\"\n",
+    );
+    s.push_str("# Décommentez pour personnaliser le gabarit de conversation :\n");
+    s.push_str("# TEMPLATE \"\"\"{{- if .System }}{{ .System }}\n\n{{ end }}{{ .Prompt }}\"\"\"\n");
+    s
 }
 
 
@@ -270,6 +451,20 @@ struct Ui {
     m_status: Rc<RefCell<Label>>,
     /// Modèles actuellement chargés (index de ligne = position dans ce Vec).
     running: Rc<RefCell<Vec<RunningModel>>>,
+    /// Onglet Modelfiles : table des modelfiles sauvegardés.
+    mf_table: Rc<RefCell<TableWidget>>,
+    /// Onglet Modelfiles : éditeur de contenu (Modelfile brut).
+    mf_editor: Rc<RefCell<PlainTextEdit>>,
+    /// Onglet Modelfiles : statut propre.
+    mf_status: Rc<RefCell<Label>>,
+    /// Onglet Modelfiles : liste en mémoire (source de vérité, persistée en JSON).
+    mf_entries: Rc<RefCell<Vec<ModelfileEntry>>>,
+    /// Onglet Modelfiles : champ « nom du modèle » (pointeur C++ pour lecture directe).
+    mf_name: *mut qtrs::ffi::QLineEdit,
+    /// Onglet Modelfiles : liste déroulante des modèles pour préremplir FROM.
+    mf_from: *mut qtrs::ffi::QComboBox,
+    /// Dernière sélection lue dans la liste FROM (évite les réécritures en boucle).
+    mf_from_last: Rc<RefCell<String>>,
 }
 
 struct Layouts {
@@ -300,6 +495,17 @@ struct Layouts {
     avail_box: VBoxLayout,
     #[allow(dead_code)]
     avail_actions: HBoxLayout,
+    /// Layout de la page Modelfiles et de ses boîtes.
+    #[allow(dead_code)]
+    d_page: VBoxLayout,
+    #[allow(dead_code)]
+    mf_list_box: VBoxLayout,
+    #[allow(dead_code)]
+    mf_list_actions: HBoxLayout,
+    #[allow(dead_code)]
+    mf_edit_box: VBoxLayout,
+    #[allow(dead_code)]
+    mf_edit_actions: HBoxLayout,
     /// Widget central sans parent : SANS lui, qtrs supprime le C++ du widget
     /// (donc toute la sous-arborescence) à la fin de `build_ui` → segfault dans
     /// `app.exec()`. Doit vivre aussi longtemps que la fenêtre.
@@ -465,6 +671,49 @@ fn refresh_list(
 }
 
 // ------------------------------------------------------------------
+// Import des Modelfiles depuis le serveur
+// ------------------------------------------------------------------
+
+/// Récupère le Modelfile de chaque modèle (`/api/tags` puis `/api/show`) dans
+/// un thread et renvoie la liste `[(nom, contenu)]` à l'UI.
+fn start_import_modelfiles(
+    tx: mpsc::Sender<WorkerMsg>,
+    url: String,
+    status: Weak<RefCell<Label>>,
+) {
+    set_status(&status, "Import des Modelfiles depuis le serveur…");
+    std::thread::spawn(move || {
+        match list_models(&url) {
+            Ok(models) => {
+                let mut items: Vec<(String, String)> = Vec::new();
+                let mut errors = 0usize;
+                for m in &models {
+                    match show_model(&url, &m.name) {
+                        Ok(info) => {
+                            let content = info
+                                .modelfile
+                                .clone()
+                                .filter(|c| !c.trim().is_empty())
+                                .unwrap_or_else(|| reconstruct_modelfile(&m.name, &info));
+                            items.push((
+                                m.name.clone(),
+                                normalise_imported_modelfile(&m.name, &content),
+                            ));
+                        }
+                        Err(_) => errors += 1,
+                    }
+                }
+                let payload = serde_json::to_string(&items).ok();
+                let _ = tx.send(WorkerMsg::ImportDone(payload, errors, String::new()));
+            }
+            Err(e) => {
+                let _ = tx.send(WorkerMsg::ImportDone(None, 0, e.to_string()));
+            }
+        }
+    });
+}
+
+// ------------------------------------------------------------------
 // Construction de l'interface
 // ------------------------------------------------------------------
 fn build_ui(
@@ -526,6 +775,24 @@ fn build_ui(
     avail_table.borrow_mut().set_column_width(2, 130);
     avail_table.borrow_mut().set_column_width(3, 220);
 
+    // Onglet Modelfiles : liste persistée + éditeur de contenu + statut.
+    let mf_table = Rc::new(RefCell::new(TableWidget::new(0, 2).build()));
+    let mf_editor = Rc::new(RefCell::new(PlainTextEdit::new().build()));
+    let mf_status = Rc::new(RefCell::new(
+        Label::new("Créez/éditez un Modelfile puis envoyez-le au serveur.").build(),
+    ));
+    let mf_entries = Rc::new(RefCell::new(load_modelfiles()));
+    mf_table.borrow_mut().set_has_parent();
+    mf_editor.borrow_mut().set_has_parent();
+    mf_status.borrow_mut().set_has_parent();
+    mf_table.borrow_mut().set_horizontal_header_labels(&["Nom du modèle", "Contenu"]);
+    mf_table.borrow_mut().set_column_width(0, 320);
+    mf_table.borrow_mut().set_column_width(1, 100);
+    mf_editor
+        .borrow_mut()
+        .set_placeholder_text("# Exemple\nFROM llama3.2:3b\nPARAMETER temperature 0.7\n# SYSTEM \"Tu es un assistant…\"");
+    fill_modelfiles(&mf_table.borrow(), &mf_entries.borrow());
+
     let w = window.borrow();
     let wp: &dyn AsWidget = &*w;
     let mut ui = Ui {
@@ -545,6 +812,13 @@ fn build_ui(
         avail_table: avail_table.clone(),
         m_status: m_status.clone(),
         running: running.clone(),
+        mf_table: mf_table.clone(),
+        mf_editor: mf_editor.clone(),
+        mf_status: mf_status.clone(),
+        mf_entries: mf_entries.clone(),
+        mf_name: std::ptr::null_mut(),
+        mf_from: std::ptr::null_mut(),
+        mf_from_last: Rc::new(RefCell::new(String::new())),
     };
 
     // ---- Menu ---------------------------------------------------------------
@@ -1089,15 +1363,251 @@ fn build_ui(
     unsafe { qtrs::ffi::QWidget_setFixedHeight(m_status_sa.widget_ptr(), 34) };
     m_l.add(m_status_sa);
 
+    // ==================================================================
+    // Page « Modelfiles » : liste persistée + éditeur + création serveur
+    // ==================================================================
+    let d_page = Widget::new().build();
+    let mut d_l = VBoxLayout::with_parent(&d_page);
+    d_l.set_spacing(10);
+
+    // ---- Boîte liste des Modelfiles enregistrés --------------------------
+    let mf_box = GroupBox::new("Modelfiles enregistrés (sauvegardés localement)")
+        .parent(&d_page)
+        .build();
+    let mut mf_list_l = VBoxLayout::with_parent(&mf_box);
+    mf_list_l.set_spacing(8);
+    let mf_list_actions_row = Widget::new().parent(&mf_box).build();
+    let mut mf_list_a = HBoxLayout::with_parent(&mf_list_actions_row);
+    mf_list_a.set_spacing(8);
+    let mf_table_sa = wrap_scroll(&mf_table, wp);
+    unsafe { qtrs::ffi::QWidget_setFixedHeight(mf_table_sa.widget_ptr(), 150) };
+    mf_list_l.add(mf_table_sa);
+
+    // ---- Boîte éditeur ---------------------------------------------------
+    let mf_edit_box = GroupBox::new("Modelfile (contenu brut)")
+        .parent(&d_page)
+        .build();
+    let mut mf_edit_l = VBoxLayout::with_parent(&mf_edit_box);
+    mf_edit_l.set_spacing(8);
+    let mf_name_lbl = Label::new("Nom du modèle cible (ex : mon-modele:latest)")
+        .parent(&mf_edit_box)
+        .build();
+    mf_edit_l.add(mf_name_lbl);
+    let mf_name_edit = LineEdit::new("").parent(&mf_edit_box).build();
+    let mf_name_ptr = mf_name_edit.widget_ptr() as *mut qtrs::ffi::QLineEdit;
+    mf_edit_l.add(mf_name_edit);
+    let mf_from_lbl = Label::new("Préremplir FROM avec un modèle présent sur le serveur")
+        .parent(&mf_edit_box)
+        .build();
+    mf_edit_l.add(mf_from_lbl);
+    let mf_from_combo = ComboBox::new().parent(&mf_edit_box).build();
+    let mf_from_ptr = mf_from_combo.widget_ptr() as *mut qtrs::ffi::QComboBox;
+    combo_add(mf_from_ptr, "— choisir un modèle —");
+    combo_set_index(mf_from_ptr, 0);
+    mf_edit_l.add(mf_from_combo);
+    let mf_editor_sa = wrap_scroll(&mf_editor, wp);
+    unsafe { qtrs::ffi::QWidget_setFixedHeight(mf_editor_sa.widget_ptr(), 230) };
+    mf_edit_l.add(mf_editor_sa);
+    let mf_edit_actions_row = Widget::new().parent(&mf_edit_box).build();
+    let mut mf_edit_a = HBoxLayout::with_parent(&mf_edit_actions_row);
+    mf_edit_a.set_spacing(8);
+
+    // ---- Boutons liste : Nouveau / Supprimer -----------------------------
+    let mf_new_btn = PushButton::new("Nouveau")
+        .on_clicked({
+            let editor = mf_editor.clone();
+            let status = Rc::downgrade(&mf_status);
+            let name_ptr = mf_name_ptr;
+            move || {
+                editor.borrow_mut().clear();
+                set_line_edit(name_ptr, "");
+                set_status(&status, "Nouveau Modelfile — saisissez un nom et un contenu.");
+            }
+        })
+        .parent(&mf_list_actions_row)
+        .build();
+    mf_list_a.add(mf_new_btn);
+
+    let mf_del_btn = PushButton::new("Supprimer")
+        .on_clicked({
+            let entries = mf_entries.clone();
+            let table = mf_table.clone();
+            let editor = mf_editor.clone();
+            let status = Rc::downgrade(&mf_status);
+            let name_ptr = mf_name_ptr;
+            move || {
+                let row = table.borrow().current_row();
+                if row < 0 || row as usize >= entries.borrow().len() {
+                    set_status(&status, "Sélectionnez un Modelfile à supprimer.");
+                    return;
+                }
+                entries.borrow_mut().remove(row as usize);
+                save_modelfiles(&entries.borrow());
+                fill_modelfiles(&table.borrow(), &entries.borrow());
+                editor.borrow_mut().clear();
+                set_line_edit(name_ptr, "");
+                set_status(&status, "Modelfile supprimé de la liste locale.");
+            }
+        })
+        .parent(&mf_list_actions_row)
+        .build();
+    mf_list_a.add(mf_del_btn);
+
+    let mf_import_btn = PushButton::new("Importer depuis le serveur")
+        .on_clicked({
+            let tx = tx.clone();
+            let status = Rc::downgrade(&mf_status);
+            move || {
+                let url = load_server_url();
+                if url.trim().is_empty() {
+                    set_status(
+                        &status,
+                        "Enregistrez d'abord l'adresse du serveur (onglet Gestion).",
+                    );
+                    return;
+                }
+                start_import_modelfiles(tx.clone(), url, status.clone());
+            }
+        })
+        .parent(&mf_list_actions_row)
+        .build();
+    mf_list_a.add(mf_import_btn);
+
+    mf_list_l.add(mf_list_actions_row);
+    d_l.add(mf_box);
+
+    // ---- Boutons éditeur : Exemple / Enregistrer / Créer ----------------
+    let mf_example_btn = PushButton::new("Exemple")
+        .on_clicked({
+            let editor = mf_editor.clone();
+            let status = Rc::downgrade(&mf_status);
+            let from_ptr = mf_from_ptr;
+            move || {
+                if !editor.borrow().plain_text().trim().is_empty()
+                    && !confirm("Remplacer le contenu actuel par un exemple ?")
+                {
+                    return;
+                }
+                let current = combo_current(from_ptr);
+                let text = example_modelfile(&current);
+                editor.borrow_mut().set_plain_text(&text);
+                set_status(
+                    &status,
+                    "Exemple inséré — adaptez les paramètres puis créez/enregistrez.",
+                );
+            }
+        })
+        .parent(&mf_edit_actions_row)
+        .build();
+    mf_edit_a.add(mf_example_btn);
+
+    let mf_save_btn = PushButton::new("Enregistrer la liste")
+        .on_clicked({
+            let entries = mf_entries.clone();
+            let table = mf_table.clone();
+            let editor = mf_editor.clone();
+            let status = Rc::downgrade(&mf_status);
+            let name_ptr = mf_name_ptr;
+            move || {
+                let name = read_line_edit(name_ptr);
+                let content = editor.borrow().plain_text();
+                if name.trim().is_empty() {
+                    set_status(&status, "Renseignez le nom du modèle.");
+                    return;
+                }
+                if content.trim().is_empty() {
+                    set_status(&status, "Le contenu du Modelfile est vide.");
+                    return;
+                }
+                upsert_modelfile(&mut entries.borrow_mut(), &name, &content);
+                save_modelfiles(&entries.borrow());
+                fill_modelfiles(&table.borrow(), &entries.borrow());
+                set_status(
+                    &status,
+                    &format!("Modelfile « {} » enregistré.", name.trim()),
+                );
+            }
+        })
+        .parent(&mf_edit_actions_row)
+        .build();
+    mf_edit_a.add(mf_save_btn);
+
+    let mf_create_btn = PushButton::new("Créer sur le serveur")
+        .on_clicked({
+            let tx = tx.clone();
+            let editor = mf_editor.clone();
+            let status = Rc::downgrade(&mf_status);
+            let name_ptr = mf_name_ptr;
+            move || {
+                let name = read_line_edit(name_ptr);
+                let content = editor.borrow().plain_text();
+                if name.trim().is_empty() || content.trim().is_empty() {
+                    set_status(&status, "Renseignez un nom et un contenu avant de créer.");
+                    return;
+                }
+                let url = load_server_url();
+                if url.trim().is_empty() {
+                    set_status(
+                        &status,
+                        "Enregistrez d'abord l'adresse du serveur (onglet Gestion).",
+                    );
+                    return;
+                }
+                let name = name.trim().to_string();
+                set_status(&status, &format!("Création de {name} sur le serveur…"));
+                let tw = tx.clone();
+                std::thread::spawn(move || {
+                    let (ok, message) = match create_model(&url, &name, &content) {
+                        Ok(()) => (true, format!("{name} créé")),
+                        Err(e) => (false, e.to_string()),
+                    };
+                    let _ = tw.send(WorkerMsg::CreateDone { name, ok, message });
+                });
+            }
+        })
+        .parent(&mf_edit_actions_row)
+        .build();
+    mf_edit_a.add(mf_create_btn);
+    mf_edit_l.add(mf_edit_actions_row);
+
+    d_l.add(mf_edit_box);
+
+    // Statut propre à l'onglet Modelfiles.
+    let mf_status_sa = wrap_scroll(&mf_status, wp);
+    unsafe { qtrs::ffi::QWidget_setFixedHeight(mf_status_sa.widget_ptr(), 34) };
+    d_l.add(mf_status_sa);
+
+    // Sélection d'une ligne : charger nom + contenu dans l'éditeur.
+    mf_table.borrow_mut().connect_current_cell_changed({
+        let entries = mf_entries.clone();
+        let table = mf_table.clone();
+        let editor = mf_editor.clone();
+        let name_ptr = mf_name_ptr;
+        move || {
+            let row = table.borrow().current_row();
+            if row < 0 {
+                return;
+            }
+            let entries = entries.borrow();
+            if let Some(e) = entries.get(row as usize) {
+                set_line_edit(name_ptr, &e.name);
+                editor.borrow_mut().set_plain_text(&e.content);
+            }
+        }
+    });
+
     // ---- Assemblage des onglets --------------------------------------------
     tabs.add_tab(Box::new(g_page), "Gestion");
     tabs.add_tab(Box::new(m_page), "Moniteur");
+    tabs.add_tab(Box::new(d_page), "Modelfiles");
     root.add(tabs);
     w.set_central_widget(&central);
 
     // Pointeurs des champs de filtre (lus par la pompe).
     ui.g_filter = g_filter_ptr;
     ui.m_filter = m_filter_ptr;
+    ui.mf_name = mf_name_ptr;
+    ui.mf_from = mf_from_ptr;
 
     let layouts = Layouts {
         root,
@@ -1113,6 +1623,11 @@ fn build_ui(
         run_actions: run_a,
         avail_box: avail_l,
         avail_actions: avail_a,
+        d_page: d_l,
+        mf_list_box: mf_list_l,
+        mf_list_actions: mf_list_a,
+        mf_edit_box: mf_edit_l,
+        mf_edit_actions: mf_edit_a,
         central,
     };
 
@@ -1194,6 +1709,13 @@ fn main() {
             let avail_table = Rc::downgrade(&ui.avail_table);
             let m_status = Rc::downgrade(&ui.m_status);
             let running = Rc::clone(&ui.running);
+            // Onglet Modelfiles.
+            let mf_status = Rc::downgrade(&ui.mf_status);
+            let mf_table = Rc::downgrade(&ui.mf_table);
+            let mf_editor = Rc::clone(&ui.mf_editor);
+            let mf_entries = Rc::clone(&ui.mf_entries);
+            let mf_from = ui.mf_from;
+            let mf_from_last = Rc::clone(&ui.mf_from_last);
             move || {
                 while let Ok(msg) = rx.try_recv() {
                     match msg {
@@ -1224,6 +1746,17 @@ fn main() {
                             // La liste alimente aussi l'onglet Moniteur.
                             if let Some(at) = avail_table.upgrade() {
                                 fill_avail(&at.borrow(), &m_view, filtered(&parsed, &nm));
+                            }
+                            // Liste déroulante « préremplir FROM » de l'onglet Modelfiles.
+                            if !mf_from.is_null() {
+                                combo_clear(mf_from);
+                                combo_add(mf_from, "— choisir un modèle —");
+                                for m in &parsed {
+                                    combo_add(mf_from, &m.name);
+                                }
+                                combo_set_index(mf_from, 0);
+                                *mf_from_last.borrow_mut() =
+                                    "— choisir un modèle —".to_string();
                             }
                             set_status(
                                 &status,
@@ -1291,6 +1824,47 @@ fn main() {
                                 refresh_running(&tx2, &url);
                             }
                         }
+                        WorkerMsg::CreateDone { name, ok, message } => {
+                            let mark = if ok { "✔" } else { "✘" };
+                            set_status(&mf_status, &format!("{mark} {name} : {message}"));
+                            // Un modèle créé apparaît dans la liste de Gestion.
+                            let url = load_server_url();
+                            if ok && !url.trim().is_empty() {
+                                spawn_list(tx2.clone(), url.clone());
+                            }
+                        }
+                        WorkerMsg::ImportDone(payload, errors, err) => {
+                            let Some(p) = payload else {
+                                set_status(&mf_status, &format!("Erreur d'import : {err}"));
+                                continue;
+                            };
+                            let imported: Vec<(String, String)> =
+                                serde_json::from_str(&p).unwrap_or_default();
+                            let mut added = 0usize;
+                            let mut skipped = 0usize;
+                            {
+                                let mut entries = mf_entries.borrow_mut();
+                                for (name, content) in imported {
+                                    // Ne pas écraser un Modelfile déjà édité localement.
+                                    if entries.iter().any(|e| e.name == name) {
+                                        skipped += 1;
+                                    } else {
+                                        entries.push(ModelfileEntry { name, content });
+                                        added += 1;
+                                    }
+                                }
+                            }
+                            save_modelfiles(&mf_entries.borrow());
+                            if let Some(t) = mf_table.upgrade() {
+                                fill_modelfiles(&t.borrow(), &mf_entries.borrow());
+                            }
+                            let mut msg =
+                                format!("{added} Modelfile(s) importé(s), {skipped} déjà présent(s)");
+                            if errors > 0 {
+                                msg.push_str(&format!(", {errors} erreur(s)"));
+                            }
+                            set_status(&mf_status, &msg);
+                        }
                     }
                 }
 
@@ -1312,6 +1886,22 @@ fn main() {
                         if let Some(at) = avail_table.upgrade() {
                             let list = filtered(&models.borrow(), &needle);
                             fill_avail(&at.borrow(), &m_view, list);
+                        }
+                    }
+                }
+
+                // ---- Liste FROM : appliquer la sélection au Modelfile -------
+                if !mf_from.is_null() {
+                    let sel = combo_current(mf_from);
+                    if sel != *mf_from_last.borrow() {
+                        *mf_from_last.borrow_mut() = sel.clone();
+                        let is_model = models.borrow().iter().any(|m| m.name == sel);
+                        if is_model {
+                            let text = mf_editor.borrow().plain_text();
+                            let new_text = set_from_in_modelfile(&text, &sel);
+                            if new_text != text {
+                                mf_editor.borrow_mut().set_plain_text(&new_text);
+                            }
                         }
                     }
                 }
@@ -1540,6 +2130,77 @@ mod tests {
         assert_eq!(
             parse_ini_server_url("[General]\nfoo=bar\nserverUrl=http://localhost:11434\n"),
             Some("http://localhost:11434".to_string())
+        );
+    }
+
+    #[test]
+    fn upsert_modelfile_remplace_sans_doublon() {
+        let mut entries: Vec<ModelfileEntry> = Vec::new();
+        upsert_modelfile(&mut entries, "mon-modele", "FROM llama3.2:3b");
+        assert_eq!(entries.len(), 1);
+        // Même nom (espaces autour ignorés) => remplacement, pas d'ajout.
+        upsert_modelfile(&mut entries, "  mon-modele  ", "FROM qwen3:8b");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "FROM qwen3:8b");
+        // Nom différent => ajout.
+        upsert_modelfile(&mut entries, "autre", "FROM phi3");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].name, "autre");
+    }
+
+    #[test]
+    fn set_from_remplace_ou_insere() {
+        // Texte vide -> FROM seul.
+        assert_eq!(set_from_in_modelfile("", "qwen3:8b"), "FROM qwen3:8b");
+        // Ligne FROM existante remplacée, le reste conservé.
+        assert_eq!(
+            set_from_in_modelfile("FROM llama3.2:3b\nPARAMETER temperature 0.2\n", "qwen3:8b"),
+            "FROM qwen3:8b\nPARAMETER temperature 0.2\n"
+        );
+        // Pas de FROM -> inséré en tête.
+        assert_eq!(
+            set_from_in_modelfile("PARAMETER temperature 0.2\n", "phi3"),
+            "FROM phi3\nPARAMETER temperature 0.2\n"
+        );
+        // Casse et espaces de début tolérés.
+        assert_eq!(
+            set_from_in_modelfile("  from old\nSYSTEM \"x\"\n", "new"),
+            "FROM new\nSYSTEM \"x\"\n"
+        );
+        // Nom vide -> texte inchangé.
+        assert_eq!(set_from_in_modelfile("FROM a\n", "  "), "FROM a\n");
+    }
+
+    #[test]
+    fn normalise_import_remplace_le_blob() {
+        let blob = "FROM /root/.ollama/models/blobs/sha256-abc\nPARAMETER temperature 0.2\n";
+        assert_eq!(
+            normalise_imported_modelfile("qwen3:8b", blob),
+            "FROM qwen3:8b\nPARAMETER temperature 0.2\n"
+        );
+        // Un FROM déjà valide (nom de modèle) est conservé.
+        let ok = "FROM llama3.2:3b\nPARAMETER temperature 0.2\n";
+        assert_eq!(normalise_imported_modelfile("autre", ok), ok);
+        // Un chemin GGUF n'est pas un blob interne -> conservé.
+        let gguf = "FROM /models/mon-fichier.gguf\n";
+        assert_eq!(normalise_imported_modelfile("x", gguf), gguf);
+    }
+
+    #[test]
+    fn exemple_modelfile_utilise_le_from_choisi() {
+        let mf = example_modelfile("qwen3:8b");
+        assert!(mf.starts_with("# Exemple"));
+        assert!(mf.contains("FROM qwen3:8b\n"));
+        assert!(mf.contains("PARAMETER temperature 0.7\n"));
+        assert!(mf.contains("PARAMETER num_ctx 4096\n"));
+        assert!(mf.contains("SYSTEM \"\"\""));
+        // Le placeholder ou un champ vide retombe sur un modèle de repli.
+        assert!(example_modelfile("— choisir un modèle —").contains("FROM llama3.2:3b\n"));
+        assert!(example_modelfile("").contains("FROM llama3.2:3b\n"));
+        // L'exemple doit être un Modelfile valide (parseur).
+        assert_eq!(
+            ollama::parse_modelfile(&mf).from.as_deref(),
+            Some("qwen3:8b")
         );
     }
 }

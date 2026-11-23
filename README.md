@@ -30,6 +30,19 @@ native. L'adresse du serveur est configurable au lancement et **persistée**
   que l'opération avance (Ollama n'expose pas de pourcentage).
 - **Filtre** — un champ de recherche filtre en direct les listes de modèles
   (onglets Gestion et Moniteur), insensible à la casse, sur le nom et le tag.
+- **Onglet Modelfiles** — écrire, enregistrer et gérer des `Modelfile`
+  (liste persistée dans
+  `~/.config/OllamaManager/ollama-manager-qt-modelfiles.json`) :
+  - *Nouveau*, *Enregistrer la liste*, *Supprimer* ;
+  - *Exemple* : insère un Modelfile-type (`FROM`, `temperature`, `top_p`,
+    `top_k`, `repeat_penalty`, `num_ctx`, `stop`, `SYSTEM`) à adapter ;
+  - *Importer depuis le serveur* : parcourt les modèles (`/api/tags` puis
+    `/api/show`) et récupère le Modelfile de chacun ; les entrées déjà
+    présentes localement ne sont pas écrasées ;
+  - liste déroulante qui préremplit la ligne `FROM` avec un modèle présent ;
+  - *Créer sur le serveur* : le Modelfile est analysé côté client puis envoyé
+    à `POST /api/create` — aucun accès au conteneur ni commande
+    `ollama create` nécessaire.
 
 ## Construction
 
@@ -46,7 +59,7 @@ Le paquet `.eopkg` et le binaire sont fournis dans les
 
 ```bash
 sudo eopkg install -y \
-  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.5-18-1-x86_64.eopkg
+  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.2.0-19-1-x86_64.eopkg
 ```
 
 Ou depuis le dépôt binaire personnel : `sudo eopkg install -y ollama-manager-qt`
@@ -59,8 +72,8 @@ Un paquet `.deb` est également fourni dans les
 [releases](https://github.com/Julien684/ollama-manager-qt/releases) :
 
 ```bash
-curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.1.5-18_amd64.deb
-sudo apt install ./ollama-manager-qt_0.1.5-18_amd64.deb
+curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.2.0-19_amd64.deb
+sudo apt install ./ollama-manager-qt_0.2.0-19_amd64.deb
 ```
 
 Fonctionne sur Debian 12+ et Ubuntu 24.04+ (Qt 6 et ses dépendances sont
@@ -132,6 +145,17 @@ address is configurable at startup and **persisted**
   counter show that the operation is progressing (Ollama exposes no percentage).
 - **Filter** — a search field filters both model lists live (Gestion and
   Monitor tabs), case-insensitive, on name and tag.
+- **Modelfiles tab** — write, save and manage `Modelfile` files (list persisted
+  in `~/.config/OllamaManager/ollama-manager-qt-modelfiles.json`):
+  - *New*, *Save list*, *Delete*;
+  - *Example*: inserts a template Modelfile (`FROM`, `temperature`, `top_p`,
+    `top_k`, `repeat_penalty`, `num_ctx`, `stop`, `SYSTEM`) to adapt;
+  - *Import from server*: walks the models (`/api/tags` then `/api/show`) and
+    fetches each model's Modelfile; entries already present locally are not
+    overwritten;
+  - a drop-down that prefills the `FROM` line with a model present;
+  - *Create on server*: the Modelfile is parsed client-side and sent to
+    `POST /api/create` — no container access or `ollama create` command needed.
 
 ## Building
 
@@ -148,7 +172,7 @@ The `.eopkg` package and the binary are provided in the
 
 ```bash
 sudo eopkg install -y \
-  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.1.5-18-1-x86_64.eopkg
+  https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt-0.2.0-19-1-x86_64.eopkg
 ```
 
 Or from the personal binary repository: `sudo eopkg install -y ollama-manager-qt`
@@ -161,8 +185,8 @@ A `.deb` package is also provided in the
 [releases](https://github.com/Julien684/ollama-manager-qt/releases):
 
 ```bash
-curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.1.5-18_amd64.deb
-sudo apt install ./ollama-manager-qt_0.1.5-18_amd64.deb
+curl -LO https://github.com/Julien684/ollama-manager-qt/releases/latest/download/ollama-manager-qt_0.2.0-19_amd64.deb
+sudo apt install ./ollama-manager-qt_0.2.0-19_amd64.deb
 ```
 
 Works on Debian 12+ and Ubuntu 24.04+ (Qt 6 and its dependencies are
